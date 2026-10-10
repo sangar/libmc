@@ -10,9 +10,14 @@ enum { DEFAULT_BLOCK_SIZE = 256 * 1024 };
 
 typedef struct Block Block;
 
+// A block comes from calloc, so its data starts out zero. dirty is how far
+// it has ever been handed out: only memory below it can hold old values and
+// needs clearing when it is handed out again. Memory above it is still zero
+// and, in a large block the system mapped fresh, not yet touched at all.
 struct Block {
     Block *next;
     size_t used;
+    size_t dirty;
     size_t capacity;
     alignas(max_align_t) unsigned char data[];
 };
@@ -25,7 +30,7 @@ struct Arena {
 
 static void *allocate_or_abort(size_t size)
 {
-    void *memory = malloc(size);
+    void *memory = calloc(1, size);
     if (memory == nullptr) {
         fprintf(stderr, "arena: out of memory allocating %zu bytes\n", size);
         abort();
@@ -58,6 +63,7 @@ static Block *block_create(size_t capacity)
     Block *block = allocate_or_abort(arena_size_add(sizeof(Block), capacity));
     block->next = nullptr;
     block->used = 0;
+    block->dirty = 0;
     block->capacity = capacity;
     return block;
 }
@@ -100,10 +106,14 @@ void *arena_push_aligned(Arena *arena, size_t size, size_t alignment)
         uintptr_t base = (uintptr_t)block->data;
         size_t start = align_up(base + block->used, alignment) - base;
         if (start <= block->capacity && size <= block->capacity - start) {
-            block->used = start + size;
+            size_t end = start + size;
+            block->used = end;
             arena->current = block;
             void *memory = block->data + start;
-            memset(memory, 0, size);
+            if (start < block->dirty) {
+                memset(memory, 0, min_size(end, block->dirty) - start);
+            }
+            block->dirty = max_size(block->dirty, end);
             return memory;
         }
         if (block->next == nullptr) {
