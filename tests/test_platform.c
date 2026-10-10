@@ -244,8 +244,16 @@ static void environment_reads_and_writes(Test *test)
     test_check(test, env_set(S("MC_TEST_VAR"), S("set"), &err) == ERR_OK, "set a variable");
     test_check(test, env_get(a, S("MC_TEST_VAR"), &value), "read it");
     test_check_str(test, value, S("set"), "its value");
+    test_check(test, strlist_contains(env_all(a), S("MC_TEST_VAR=set")), "env_all lists it");
     env_unset(S("MC_TEST_VAR"));
     test_check(test, !env_get(a, S("MC_TEST_VAR"), &value), "unset removes it");
+}
+
+static void processes_take_signals_and_limits(Test *test)
+{
+    Err err = { 0 };
+    test_check(test, process_raise_file_limit(&err) == ERR_OK, "the file limit can be raised");
+    test_check(test, process_signal(1 << 22, SIGNAL_RELOAD, &err) == ERR_NOT_FOUND, "a missing process is ERR_NOT_FOUND");
 }
 
 typedef struct {
@@ -455,6 +463,26 @@ static void unix_sockets_carry_bytes(Test *test)
     test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
 }
 
+static void network_reports_the_port_it_chose(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    int listener;
+    String address = S("");
+    test_check(test, net_listen(S("127.0.0.1:0"), &listener, &err) == ERR_OK, "listen on any free port");
+    test_check(test, net_local_address(a, listener, &address, &err) == ERR_OK, "ask where it listens");
+    String host;
+    String port;
+    str_cut(address, ':', &host, &port);
+    uint64_t number = 0;
+    test_check_str(test, host, S("127.0.0.1"), "the host it was given");
+    test_check(test, str_parse_u64(port, &number) && number > 0, "a real port");
+    int client = -1;
+    test_check(test, net_connect(host, port, 1000, &client, &err) == ERR_OK, "the address can be connected to");
+    net_close(client);
+    net_close(listener);
+}
+
 const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
@@ -465,11 +493,13 @@ const TestCase PLATFORM_TESTS[] = {
     { "processes_capture_output_and_status", processes_capture_output_and_status },
     { "processes_stream_more_than_a_pipe_holds", processes_stream_more_than_a_pipe_holds },
     { "environment_reads_and_writes", environment_reads_and_writes },
+    { "processes_take_signals_and_limits", processes_take_signals_and_limits },
     { "threads_share_state_under_a_mutex", threads_share_state_under_a_mutex },
     { "clock_moves_forward", clock_moves_forward },
     { "network_rejects_a_bad_address", network_rejects_a_bad_address },
     { "dir_read_describes_each_entry", dir_read_describes_each_entry },
     { "files_map_and_append", files_map_and_append },
     { "unix_sockets_carry_bytes", unix_sockets_carry_bytes },
+    { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
     { nullptr, nullptr },
 };
