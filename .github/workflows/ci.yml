@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, cc: clang-18 }
+          - { os: ubuntu-24.04, cc: gcc-14 }
+          - { os: ubuntu-24.04-arm, cc: clang-18 }
+          - { os: ubuntu-24.04-arm, cc: gcc-14 }
+          - { os: macos-15, cc: clang }
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang-18 gcc-14
+      # Older AddressSanitizer runtimes crash at startup when the kernel uses
+      # 32 bits of mmap randomisation, as the Ubuntu runner kernels do.
+      - name: Reduce mmap randomisation for AddressSanitizer
+        if: runner.os == 'Linux'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Bootstrap the build program
+        run: $CC tools/build.c -o nob
+      - name: Test under AddressSanitizer and UBSan
+        run: ./nob test
+      - name: Release build
+        run: ./nob release
+
+  cross:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Bootstrap the build program
+        run: cc tools/build.c -o nob
+      - name: Cross-compile every target with zig
+        run: ./nob cross
