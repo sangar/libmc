@@ -28,6 +28,39 @@ static void arena_mark_release_reuses_memory(Test *test)
     arena_destroy(arena);
 }
 
+static bool is_zero(const unsigned char *bytes, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void arena_clears_only_what_was_used(Test *test)
+{
+    Arena *arena = arena_create(4096);
+    ArenaMark mark = arena_mark(arena);
+    unsigned char *bytes = arena_push(arena, 100);
+    memset(bytes, 0xff, 100);
+    arena_release(mark);
+    bytes = arena_push(arena, 300);
+    test_check(test, is_zero(bytes, 300), "a push across what was used before is zero throughout");
+    memset(bytes, 0xff, 300);
+    arena_release(mark);
+    bytes = arena_push(arena, 50);
+    unsigned char *after = arena_push(arena, 200);
+    test_check(test, is_zero(bytes, 50) && is_zero(after, 200), "pushes inside used memory are zero");
+    unsigned char *large = arena_push(arena, 1 << 20);
+    memset(large, 0xff, 1 << 20);
+    arena_reset(arena);
+    arena_push(arena, 4000);
+    large = arena_push(arena, 1 << 20);
+    test_check(test, is_zero(large, 1 << 20), "a reused large block is zero");
+    arena_destroy(arena);
+}
+
 static void arena_memory_is_zeroed_and_aligned(Test *test)
 {
     Arena *arena = arena_create(256);
@@ -108,6 +141,7 @@ const TestCase ARENA_TESTS[] = {
     { "arena_grows_past_block_size", arena_grows_past_block_size },
     { "arena_mark_release_reuses_memory", arena_mark_release_reuses_memory },
     { "arena_memory_is_zeroed_and_aligned", arena_memory_is_zeroed_and_aligned },
+    { "arena_clears_only_what_was_used", arena_clears_only_what_was_used },
     { "arena_grow_doubles_and_keeps_items", arena_grow_doubles_and_keeps_items },
     { "overflowing_sizes_abort", overflowing_sizes_abort },
     { nullptr, nullptr },
