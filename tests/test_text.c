@@ -30,6 +30,23 @@ static void utf8_roundtrip_and_validation(Test *test)
     test_check(test, replaced, "surrogates and values past U+10FFFF encode as U+FFFD");
 }
 
+static void utf8_converts_latin1(Test *test)
+{
+    Arena *a = test->arena;
+    test_check_str(test, utf8_from_latin1(a, (String){ "Bl\xE5" "b\xE6" "r", 6 }), S("Blåbær"),
+                   "latin-1 letters convert");
+    test_check_str(test, utf8_from_latin1(a, S("plain ascii")), S("plain ascii"), "ascii is unchanged");
+    test_check(test, utf8_from_latin1(a, S("")).len == 0, "empty text stays empty");
+    char every_byte[256];
+    for (size_t i = 0; i < countof(every_byte); i++) {
+        every_byte[i] = (char)i;
+    }
+    String converted = utf8_from_latin1(a, (String){ every_byte, countof(every_byte) });
+    test_check(test, utf8_is_valid(converted) && utf8_count(converted) == 256 && converted.len == 384,
+               "every byte becomes one code point");
+    test_check(test, converted.data[converted.len] == '\0', "the result is NUL-terminated");
+}
+
 static void glob_matches_paths(Test *test)
 {
     test_check(test, glob_match(S("*.tmp"), S("a.tmp")), "star matches within an element");
@@ -262,6 +279,7 @@ static void sigv4_signs_like_aws(Test *test)
 
 const TestCase TEXT_TESTS[] = {
     { "utf8_roundtrip_and_validation", utf8_roundtrip_and_validation },
+    { "utf8_converts_latin1", utf8_converts_latin1 },
     { "glob_matches_paths", glob_matches_paths },
     { "path_lexical_operations", path_lexical_operations },
     { "fmt_durations", fmt_durations },
