@@ -205,6 +205,9 @@ static Node *convert_scalar(Converter *c, const cyaml_node_t *source)
     } else {
         *out = node_create(c->arena, source->type == CYAML_SEQ ? NODE_SEQUENCE : NODE_MAPPING);
     }
+    (*out)->line = source->span.start_line;
+    (*out)->offset = source->span.off;
+    (*out)->length = source->span.len;
     Anchored *anchored = nullptr;
     if (source->anchor.len > 0) {
         anchored = arena_push(c->arena, sizeof *anchored);
