@@ -191,12 +191,16 @@ int process_user_id(void);
 // The program's input and output are the null device.
 [[nodiscard]] Error process_open_default(String path, Err *err);
 bool process_alive(int pid);
+// process_raise_file_limit lifts this process's soft limit on open descriptors to the hard limit.
+[[nodiscard]] Error process_raise_file_limit(Err *err);
 
 // ---- environment ----
 
 bool env_get(Arena *arena, String name, String *value);
 [[nodiscard]] Error env_set(String name, String value, Err *err);
 void env_unset(String name);
+// env_all lists the environment as NAME=value entries copied into the arena.
+StringList env_all(Arena *arena);
 // env_home is $HOME, else the account's home directory, else ".".
 String env_home(Arena *arena);
 String host_short_name(Arena *arena);
@@ -210,11 +214,17 @@ typedef enum Signal { SIGNAL_STOP, SIGNAL_RELOAD } Signal;
 void signals_block(void);
 // signals_wait blocks until a stop or reload signal arrives.
 Signal signals_wait(void);
+// process_signal sends pid the stop (SIGTERM) or reload (SIGHUP) signal; a
+// process that is gone is ERR_NOT_FOUND.
+[[nodiscard]] Error process_signal(int pid, Signal signal, Err *err);
 
 // ---- network ----
 
 // net_listen binds host:port, all interfaces when host is empty, and listens.
 [[nodiscard]] Error net_listen(String address, int *fd, Err *err);
+// net_local_address is the host:port fd is bound to, with the port chosen
+// when it listened on port 0, in the form net_listen and net_connect take.
+[[nodiscard]] Error net_local_address(Arena *arena, int fd, String *address, Err *err);
 // net_accept waits up to timeout_ms for a connection and reports whether one arrived.
 bool net_accept(int listener, int timeout_ms, int *client);
 // net_connect is ERR_NETWORK when the host cannot be resolved or reached within timeout_ms.
