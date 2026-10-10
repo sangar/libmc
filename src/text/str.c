@@ -69,17 +69,26 @@ bool str_ends_with(String s, String suffix)
     return s.len >= suffix.len && str_equal(str_slice(s, s.len - suffix.len, s.len), suffix);
 }
 
+// memchr skips to each occurrence of the needle's first byte, so the full
+// comparison runs only where a match can start.
 bool str_find(String s, String needle, size_t *index)
 {
     if (needle.len == 0) {
         *index = 0;
         return true;
     }
-    for (size_t i = 0; i + needle.len <= s.len; i++) {
-        if (memcmp(s.data + i, needle.data, needle.len) == 0) {
-            *index = i;
+    size_t start = 0;
+    while (start + needle.len <= s.len) {
+        const char *first = memchr(s.data + start, needle.data[0], s.len - needle.len + 1 - start);
+        if (first == nullptr) {
+            return false;
+        }
+        start = (size_t)(first - s.data);
+        if (memcmp(first, needle.data, needle.len) == 0) {
+            *index = start;
             return true;
         }
+        start++;
     }
     return false;
 }
