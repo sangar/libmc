@@ -14,6 +14,19 @@ static void str_slicing_and_search(Test *test)
     test_check(test, str_compare(S("ab"), S("abc")) < 0 && str_compare(S("b"), S("abc")) > 0, "compare orders");
 }
 
+static void str_find_edges(Test *test)
+{
+    size_t index = 0;
+    test_check(test, str_find(S("aaab"), S("aab"), &index) && index == 1, "find past a partial match");
+    test_check(test, str_find(S("abcabd"), S("abd"), &index) && index == 3, "find after a failed first byte");
+    test_check(test, str_find(S("xyz"), S("xyz"), &index) && index == 0, "find the whole string");
+    test_check(test, str_find(S("a.txt"), S("txt"), &index) && index == 2, "find at the very end");
+    test_check(test, !str_find(S("ab"), S("abc"), &index), "find a needle longer than the string");
+    test_check(test, !str_find(S(""), S("a"), &index), "find in an empty string");
+    test_check(test, !str_find(S("abab"), S("ba "), &index), "find stops before running off the end");
+    test_check(test, str_find(S("abc"), S(""), &index) && index == 0, "find an empty needle");
+}
+
 static void str_cut_trim_case(Test *test)
 {
     String head;
@@ -85,6 +98,7 @@ static void strlist_sorts_and_contains(Test *test)
 
 const TestCase STR_TESTS[] = {
     { "str_slicing_and_search", str_slicing_and_search },
+    { "str_find_edges", str_find_edges },
     { "str_cut_trim_case", str_cut_trim_case },
     { "str_parse_numbers", str_parse_numbers },
     { "str_builder_and_format", str_builder_and_format },
