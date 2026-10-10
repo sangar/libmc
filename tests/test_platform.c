@@ -226,11 +226,13 @@ static void processes_stream_more_than_a_pipe_holds(Test *test)
                "run a child that fills stderr");
     test_check(test, result.stderr_text.len == 1048576, "all of stderr is captured");
 
+    // The suite may inherit SIGPIPE ignored, as GitHub Actions does; the default would end the process.
+    void (*inherited)(int) = signal(SIGPIPE, SIG_DFL);
     const char *const deaf[] = { "true" };
     test_check(test, process_run(a, strlist_of(a, countof(deaf), deaf), input, &result, &err) == ERR_OK,
                "a child that exits before reading its input");
     test_check(test, result.exit_code == 0, "its exit code is reported");
-    test_check(test, signal(SIGPIPE, SIG_DFL) == SIG_DFL, "the process keeps its SIGPIPE handling");
+    test_check(test, signal(SIGPIPE, inherited) == SIG_DFL, "the process keeps its SIGPIPE handling");
 }
 
 static void environment_reads_and_writes(Test *test)

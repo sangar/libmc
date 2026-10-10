@@ -1,4 +1,4 @@
-# modern-c-stdlib
+# libmc
 
 A small foundation library for C: arenas, length-carrying strings, one error model, containers, text utilities and a portable platform layer. It builds to a single static library, `libmc.a`, with a plain C ABI, so it can be linked from C, C++ and any language with a C foreign function interface.
 
