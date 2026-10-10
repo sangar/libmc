@@ -125,6 +125,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/text/fmt.h` | Go-style durations, RFC 3339 timestamps, thousands separators, byte sizes |
 | | `mc/text/table.h` | Aligned columns like Go's tabwriter |
 | container | `mc/container/strmap.h` | String-keyed open-addressing hash map with removal |
+| | `mc/container/idtable.h` | Hash set of ids whose keys live elsewhere, four bytes a slot |
 | | `mc/container/hash.h` | FNV-1a hashing |
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
