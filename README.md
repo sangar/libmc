@@ -143,10 +143,6 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 
 The header comments document each function's contract.
 
-## Roadmap
-
-- HTTP client
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
