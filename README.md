@@ -8,7 +8,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
 - **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The one vendored library, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, is pinned in `deps.lock` and builds into `libmc.a`.
-- **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets and login services.
+- **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching and login services.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
 ## Requirements
@@ -22,6 +22,8 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 | Profile | Modern C Level 2 |
 
 Windows is not supported until `src/platform/` has a Windows implementation.
+
+Cross builds of the macOS library need no macOS SDK: `src/platform/watch_darwin.c` declares the few FSEvents functions it calls, and where the SDK is present the compiler checks those declarations against its headers.
 
 ## Building
 
@@ -50,7 +52,7 @@ CI runs `./nob test` and `./nob release` with clang 18 and gcc 14 on Linux x86_6
 
 ## Usage
 
-Link `libmc.a` with `-lpthread -lm` and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources, plus `deps/cyaml/*.c` as C11 with `deps/cyaml` on the include path. cyaml is upstream's code, so it builds without libmc's warning flags. Headers are included by area and module:
+Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching, and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources, plus `deps/cyaml/*.c` as C11 with `deps/cyaml` on the include path. cyaml is upstream's code, so it builds without libmc's warning flags. Headers are included by area and module:
 
 ```c
 #include <stdio.h>
@@ -128,6 +130,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
 | | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing |
 | platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files, directories, processes, environment, signals, sockets |
+| | `mc/platform/watch.h` | Recursive file watching on FSEvents and inotify, in settled batches of paths |
 | | `mc/platform/service.h` | Per-user login services: launchd agents and systemd user units |
 | concurrency | `mc/concurrency/cancel.h` | Cancellation token with waits and sleeps that wake on cancel |
 | | `mc/concurrency/debounce.h` | Per-key debouncing: a callback once a key has been quiet for a delay |
@@ -142,7 +145,6 @@ The header comments document each function's contract.
 
 ## Roadmap
 
-- File watching on FSEvents and inotify, with debouncing
 - HTTP client
 
 ## License
