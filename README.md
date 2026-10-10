@@ -1,15 +1,15 @@
 # libmc
 
-A small foundation library for C: arenas, length-carrying strings, one error model, containers, text utilities, JSON, structured logging and a portable platform layer. It builds to a single static library, `libmc.a`, with a plain C ABI, so it can be linked from C, C++ and any language with a C foreign function interface.
+A small foundation library for C: arenas, length-carrying strings, one error model, containers, text utilities, JSON and YAML, structured logging and a portable platform layer. It builds to a single static library, `libmc.a`, with a plain C ABI, so it can be linked from C, C++ and any language with a C foreign function interface.
 
 ## Features
 
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **No dependencies** beyond libc and pthreads, and no global state for the caller to manage.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The one vendored library, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, is pinned in `deps.lock` and builds into `libmc.a`.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals and sockets.
-- **JSON** parsing into a document tree and encoding back, with numbers read the same whatever locale the program set.
+- **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
 ## Requirements
 
@@ -50,7 +50,7 @@ CI runs `./nob test` and `./nob release` with clang 18 and gcc 14 on Linux x86_6
 
 ## Usage
 
-Link `libmc.a` and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources. Headers are included by area and module:
+Link `libmc.a` with `-lpthread -lm` and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources, plus `deps/cyaml/*.c` as C11 with `deps/cyaml` on the include path. cyaml is upstream's code, so it builds without libmc's warning flags. Headers are included by area and module:
 
 ```c
 #include <stdio.h>
@@ -83,7 +83,7 @@ int main(int argc, char **argv)
 ```
 
 ```sh
-cc -std=c23 -Iinclude main.c out/release/libmc.a -lpthread -o example
+cc -std=c23 -Iinclude main.c out/release/libmc.a -lpthread -lm -o example
 ```
 
 ### From other languages
@@ -101,7 +101,7 @@ The library exports plain C functions and fixed-layout structs, so any language 
 ## Conventions
 
 - **Strings.** A `String` is a view and owns nothing. Functions that take an `Arena` return NUL-terminated strings allocated in it.
-- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`.
+- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`.
 - **Errors.** A function that can fail for reasons outside the caller's control, such as I/O, the network or a child process, returns `Error` and is marked `[[nodiscard]]`. Results come back through out-parameters. The last parameter is an optional `Err *` that receives a human-readable message; pass `nullptr` to ignore it. Parsers and lookups, for which "no" is an ordinary answer, return `bool` instead. Running out of memory, an allocation size that overflows, or a failed mutex or condition variable call aborts.
 - **Ownership is in the signature.** A function that allocates takes an `Arena *`. A function without one returns a view or nothing.
 - **No global state.** The exceptions are `env_set`, which changes the process environment, and the C locale that `float_parse` and `float_format` create once and share. `process_run` blocks `SIGPIPE` only in the calling thread while it feeds the child, and discards any `SIGPIPE` that leaves pending.
@@ -133,6 +133,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/concurrency/threadpool.h` | Thread pool, chunked parallel loops, and one thread per job |
 | encoding | `mc/encoding/node.h` | Document tree of scalars, sequences and mappings shared by the parsers |
 | | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting |
+| | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 
 The header comments document each function's contract.
@@ -141,7 +142,6 @@ The header comments document each function's contract.
 
 - File watching on FSEvents and inotify, with debouncing
 - User service registration for launchd and systemd
-- YAML parsing into the same document tree as JSON
 - HTTP client
 
 ## License

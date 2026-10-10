@@ -55,6 +55,10 @@ static const char *const WARNING_FLAGS[] = {
 static const char *const DEBUG_FLAGS[] = { "-g", "-O0", "-fsanitize=address,undefined", "-fno-omit-frame-pointer" };
 static const char *const RELEASE_FLAGS[] = { "-O2", "-DNDEBUG" };
 static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log" };
+// Vendored sources, pinned in deps.lock. They compile in their own standard
+// without the warning flags: their warnings are upstream's to fix.
+static const char *const DEPENDENCIES[] = { "deps/cyaml" };
+static const char *const DEPENDENCY_FLAGS[] = { "-std=c11", "-w" };
 
 static void command_push(Command *command, const char *item)
 {
@@ -154,6 +158,9 @@ static time_t newest_header_mtime(void)
         snprintf(directory, sizeof directory, "src/%s", AREAS[i]);
         list_files(&headers, directory, ".h");
     }
+    for (size_t i = 0; i < sizeof DEPENDENCIES / sizeof *DEPENDENCIES; i++) {
+        list_files(&headers, DEPENDENCIES[i], ".h");
+    }
     list_files(&headers, "tests", ".h");
     time_t newest = 0;
     for (size_t i = 0; i < headers.count; i++) {
@@ -165,6 +172,7 @@ static time_t newest_header_mtime(void)
 
 typedef struct {
     bool release;
+    bool dependency;
     const Target *target;
     char out_dir[PATH_MAX_LEN];
     char obj_dir[PATH_MAX_LEN];
@@ -213,7 +221,11 @@ static void object_path(char *out, const char *obj_dir, const char *source)
 static void push_compile_command(Command *command, const Build *build)
 {
     push_compiler(command, build);
-    command_push_many(command, WARNING_FLAGS, sizeof WARNING_FLAGS / sizeof *WARNING_FLAGS);
+    if (build->dependency) {
+        command_push_many(command, DEPENDENCY_FLAGS, sizeof DEPENDENCY_FLAGS / sizeof *DEPENDENCY_FLAGS);
+    } else {
+        command_push_many(command, WARNING_FLAGS, sizeof WARNING_FLAGS / sizeof *WARNING_FLAGS);
+    }
     if (build->release) {
         command_push_many(command, RELEASE_FLAGS, sizeof RELEASE_FLAGS / sizeof *RELEASE_FLAGS);
     } else if (sanitized(build)) {
@@ -222,6 +234,10 @@ static void push_compile_command(Command *command, const Build *build)
         command_push(command, "-g");
     }
     command_push(command, "-Iinclude");
+    for (size_t i = 0; i < sizeof DEPENDENCIES / sizeof *DEPENDENCIES; i++) {
+        command_push(command, "-I");
+        command_push(command, DEPENDENCIES[i]);
+    }
 }
 
 static void command_text(const Command *command, char *out, size_t size)
@@ -345,6 +361,11 @@ static void build_library(const Build *build, FileList *objects, char *library_o
         snprintf(directory, sizeof directory, "src/%s", AREAS[i]);
         compile_directory(build, directory, objects);
     }
+    Build dependency = *build;
+    dependency.dependency = true;
+    for (size_t i = 0; i < sizeof DEPENDENCIES / sizeof *DEPENDENCIES; i++) {
+        compile_directory(&dependency, DEPENDENCIES[i], objects);
+    }
     snprintf(library_out, PATH_MAX_LEN, "%s/libmc.a", build->out_dir);
     // The member list catches a removed source, which leaves every object older than the archive.
     char members[MAX_FILES * PATH_MAX_LEN];
@@ -396,6 +417,7 @@ static int build_and_run_tests(const Build *build)
         }
         command_push(&command, library);
         command_push(&command, "-lpthread");
+        command_push(&command, "-lm");
         command_push(&command, "-o");
         command_push(&command, binary);
         run_or_die(&command);
@@ -408,6 +430,7 @@ static int build_and_run_tests(const Build *build)
 static void configure(Build *build, bool release, const Target *target)
 {
     build->release = release;
+    build->dependency = false;
     build->target = target;
     build->headers_mtime = newest_header_mtime();
     snprintf(build->out_dir, sizeof build->out_dir, "out/%s%s%s", target != NULL ? target->name : "",
