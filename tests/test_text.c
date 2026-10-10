@@ -122,6 +122,31 @@ static void fmt_times_and_numbers(Test *test)
     test_check_str(test, fmt_bytes(a, 1536 * 1024), S("1.5 MB"), "megabytes");
 }
 
+static void civil_dates_convert(Test *test)
+{
+    struct {
+        CivilDate date;
+        int64_t days;
+    } cases[] = {
+        { { 1970, 1, 1 }, 0 },          { { 1969, 12, 31 }, -1 },      { { 2000, 2, 29 }, 11016 },
+        { { 2000, 3, 1 }, 11017 },      { { 2024, 2, 29 }, 19782 },    { { 1600, 3, 1 }, -135080 },
+        { { 1, 1, 1 }, -719162 },       { { 9999, 12, 31 }, 2932896 },
+    };
+    for (size_t i = 0; i < countof(cases); i++) {
+        CivilDate date = civil_from_days(cases[i].days);
+        test_check(test, civil_to_days(cases[i].date) == cases[i].days, "civil_to_days counts days");
+        test_check(test,
+                   date.year == cases[i].date.year && date.month == cases[i].date.month &&
+                       date.day == cases[i].date.day,
+                   "civil_from_days finds the date");
+    }
+    bool round_trips = true;
+    for (int64_t days = -1000000; days <= 1000000; days += 7) {
+        round_trips = round_trips && civil_to_days(civil_from_days(days)) == days;
+    }
+    test_check(test, round_trips, "civil dates round-trip across four millennia either side of 1970");
+}
+
 static void sha256_known_vectors(Test *test)
 {
     uint8_t digest[SHA256_LEN];
@@ -266,6 +291,7 @@ const TestCase TEXT_TESTS[] = {
     { "path_lexical_operations", path_lexical_operations },
     { "fmt_durations", fmt_durations },
     { "fmt_times_and_numbers", fmt_times_and_numbers },
+    { "civil_dates_convert", civil_dates_convert },
     { "sha256_known_vectors", sha256_known_vectors },
     { "sort_orders_and_selects", sort_orders_and_selects },
     { "table_aligns_columns", table_aligns_columns },

@@ -1,5 +1,6 @@
 #include "mc/text/fmt.h"
 
+#include <assert.h>
 #include <stdckdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -181,15 +182,7 @@ bool fmt_parse_duration(String text, int64_t *nanoseconds)
     return true;
 }
 
-typedef struct {
-    int64_t year;
-    unsigned month;
-    unsigned day;
-} CivilDate;
-
-// civil_from_days converts days since 1970-01-01 to a proleptic Gregorian
-// date, after Howard Hinnant's chrono-compatible algorithm.
-static CivilDate civil_from_days(int64_t days)
+CivilDate civil_from_days(int64_t days)
 {
     days += 719468;
     int64_t era = (days >= 0 ? days : days - 146096) / 146097;
@@ -203,6 +196,18 @@ static CivilDate civil_from_days(int64_t days)
         .month = month,
         .day = day_of_year - (153 * shifted_month + 2) / 5 + 1,
     };
+}
+
+int64_t civil_to_days(CivilDate date)
+{
+    assert(date.month >= 1 && date.month <= 12 && date.day >= 1 && date.day <= 31);
+    int64_t year = date.year - (date.month <= 2);
+    int64_t era = (year >= 0 ? year : year - 399) / 400;
+    unsigned year_of_era = (unsigned)(year - era * 400);
+    unsigned shifted_month = date.month > 2 ? date.month - 3 : date.month + 9;
+    unsigned day_of_year = (153 * shifted_month + 2) / 5 + date.day - 1;
+    unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    return era * 146097 + (int64_t)day_of_era - 719468;
 }
 
 static int64_t floor_divide(int64_t value, int64_t divisor, int64_t *remainder)
