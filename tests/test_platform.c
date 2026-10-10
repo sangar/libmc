@@ -2,6 +2,7 @@
 
 #include "mc/text/path.h"
 #include "mc/platform/platform.h"
+#include "mc/platform/terminal.h"
 
 #include <signal.h>
 
@@ -388,6 +389,7 @@ static void files_map_and_append(Test *test)
     String missing = path_join(a, dir, S("missing"));
     test_check(test, file_map(missing, &map, &err) == ERR_NOT_FOUND, "mapping a missing file");
     test_check(test, file_open_append(missing, &fd, &err) == ERR_NOT_FOUND, "appending needs the file");
+    test_check(test, !terminal_is_terminal(-1), "no descriptor is no terminal");
     test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
 }
 
