@@ -69,6 +69,9 @@ typedef struct FileInfo {
     bool is_symlink;
     int64_t size;
     int64_t mtime_ns;
+    // birth_ns is when the file was created, 0 where the system does not
+    // report it, as Linux stat does not.
+    int64_t birth_ns;
     unsigned mode; // permission bits
 } FileInfo;
 
@@ -80,6 +83,9 @@ bool file_exists(String path);
 
 // file_open_read is ERR_NOT_FOUND when path or a directory on the way is missing.
 [[nodiscard]] Error file_open_read(String path, int *fd, Err *err);
+// file_open_append opens an existing file to read anywhere in it and to
+// append to it; ERR_NOT_FOUND when it is missing.
+[[nodiscard]] Error file_open_append(String path, int *fd, Err *err);
 // file_create opens path for writing, creating or truncating it.
 [[nodiscard]] Error file_create(String path, unsigned mode, int *fd, Err *err);
 // file_create_unique replaces the trailing XXXXXX of pattern with a unique name, creates that file and stores its path.
@@ -103,6 +109,19 @@ void file_close(int fd);
 // file_write_atomic creates the parent directories, writes a temporary file beside path and renames it over path.
 [[nodiscard]] Error file_write_atomic(String path, String contents, unsigned mode, Err *err);
 
+// FileMap is a whole file mapped read-only into memory. The mapping keeps
+// the bytes the file had when it was mapped, even after the file is renamed
+// over or removed, until file_unmap.
+typedef struct FileMap {
+    const void *data;
+    size_t len;
+} FileMap;
+
+// file_map is ERR_NOT_FOUND when path is missing. An empty file maps to
+// nullptr and length 0.
+[[nodiscard]] Error file_map(String path, FileMap *map, Err *err);
+void file_unmap(FileMap map);
+
 // ---- directories ----
 
 // dir_create and dir_create_all are ERR_OK when the directory already exists,
@@ -115,6 +134,25 @@ void file_close(int fd);
 [[nodiscard]] Error dir_remove_all(String path, Err *err);
 // dir_list appends the sorted entry names of path, without . and .., to names.
 [[nodiscard]] Error dir_list(Arena *arena, String path, StringList *names, Err *err);
+// DirEntry is one entry of a directory, described as file_info would.
+typedef struct DirEntry {
+    String name;
+    FileInfo info;
+} DirEntry;
+
+typedef struct DirEntryList {
+    DirEntry *items;
+    size_t count;
+    size_t capacity;
+} DirEntryList;
+
+// dir_read appends the entries of path, without . and .., in the order the
+// system lists them, each described without following a final symlink. It
+// is dir_list and file_info in one pass: on macOS one getattrlistbulk call
+// describes many entries, elsewhere each costs a stat. An entry that
+// disappears while the directory is read is left out. On an error, entries
+// keeps what was read before it.
+[[nodiscard]] Error dir_read(Arena *arena, String path, DirEntryList *entries, Err *err);
 // dir_create_temp makes a fresh directory named prefix plus a random suffix in the temporary directory.
 [[nodiscard]] Error dir_create_temp(Arena *arena, String prefix, String *path, Err *err);
 
@@ -145,6 +183,13 @@ typedef struct ProcessResult {
 bool process_look_path(Arena *arena, String name, String *path);
 [[nodiscard]] Error process_executable_path(Arena *arena, String *path, Err *err);
 int process_id(void);
+// process_user_id is the real user id, which tells apart the per-user
+// resources of a shared machine, such as sockets in a shared directory.
+int process_user_id(void);
+// process_open_default opens path in the desktop's default application for
+// it, with open on macOS and xdg-open elsewhere, and does not wait for it.
+// The program's input and output are the null device.
+[[nodiscard]] Error process_open_default(String path, Err *err);
 bool process_alive(int pid);
 
 // ---- environment ----
@@ -180,3 +225,18 @@ bool net_accept(int listener, int timeout_ms, int *client);
 // net_set_timeouts bounds each later send and receive on fd.
 [[nodiscard]] Error net_set_timeouts(int fd, int timeout_ms, Err *err);
 void net_close(int fd);
+
+// net_listen_unix creates a Unix domain socket at path with the permission
+// bits mode and listens. Something already at path is ERR_IO; a path too long
+// for a socket address is ERR_INVALID_ARGUMENT.
+[[nodiscard]] Error net_listen_unix(String path, unsigned mode, int *fd, Err *err);
+// net_connect_unix is ERR_NETWORK when nothing listens at path.
+[[nodiscard]] Error net_connect_unix(String path, int *fd, Err *err);
+// net_send writes all of data to a connected socket. A peer that has gone is
+// ERR_NETWORK, never a SIGPIPE.
+[[nodiscard]] Error net_send(int fd, String data, Err *err);
+// net_receive reads up to capacity bytes; *got is 0 once the peer has closed.
+[[nodiscard]] Error net_receive(int fd, void *buffer, size_t capacity, size_t *got, Err *err);
+// net_shutdown ends both directions of fd, which wakes a thread blocked in
+// net_receive on it. The descriptor stays open until net_close.
+void net_shutdown(int fd);

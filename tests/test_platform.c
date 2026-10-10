@@ -308,6 +308,151 @@ static void network_rejects_a_bad_address(Test *test)
                "connecting to a closed port is ERR_NETWORK");
 }
 
+static const DirEntry *find_entry(const DirEntryList *entries, String name)
+{
+    for (size_t i = 0; i < entries->count; i++) {
+        if (str_equal(entries->items[i].name, name)) {
+            return &entries->items[i];
+        }
+    }
+    return nullptr;
+}
+
+static void dir_read_describes_each_entry(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    test_check(test, file_write_all(path_join(a, dir, S("data.txt")), S("12345"), 0640, &err) == ERR_OK, "a file");
+    test_check(test, dir_create(path_join(a, dir, S("sub")), 0755, &err) == ERR_OK, "a directory");
+    String link = path_join(a, dir, S("link"));
+    String ln[] = { S("ln"), S("-s"), S("missing-target"), link };
+    test_check(test, run_quietly(a, ln, countof(ln)), "a dangling symlink");
+
+    DirEntryList entries = { 0 };
+    test_check(test, dir_read(a, dir, &entries, &err) == ERR_OK, "read the directory");
+    test_check(test, entries.count == 3, "three entries, without . and ..");
+    const DirEntry *file = find_entry(&entries, S("data.txt"));
+    test_check(test, file != nullptr && file->info.is_regular && file->info.size == 5 && file->info.mode == 0640,
+               "the file's type, size and mode");
+    FileInfo stat_info;
+    test_check(test, file_info(path_join(a, dir, S("data.txt")), &stat_info, &err) == ERR_OK, "stat the file");
+    test_check(test, file != nullptr && file->info.mtime_ns == stat_info.mtime_ns &&
+                         file->info.birth_ns == stat_info.birth_ns,
+               "times agree with file_info");
+    const DirEntry *sub = find_entry(&entries, S("sub"));
+    test_check(test, sub != nullptr && sub->info.is_dir, "the directory is one");
+    const DirEntry *symlink = find_entry(&entries, S("link"));
+    test_check(test, symlink != nullptr && symlink->info.is_symlink, "a symlink is not followed");
+
+    test_check(test, dir_read(a, path_join(a, dir, S("missing")), &entries, &err) == ERR_NOT_FOUND,
+               "a missing directory");
+    test_check(test, entries.count == 3, "a failed read appends nothing");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
+static void files_map_and_append(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    String file = path_join(a, dir, S("log"));
+    test_check(test, file_write_all(file, S("head"), 0600, &err) == ERR_OK, "write a file");
+
+    FileMap map;
+    test_check(test, file_map(file, &map, &err) == ERR_OK, "map it");
+    test_check_str(test, (String){ map.data, map.len }, S("head"), "the mapping holds the contents");
+    test_check(test, file_write_atomic(file, S("replaced"), 0600, &err) == ERR_OK, "replace the file");
+    test_check_str(test, (String){ map.data, map.len }, S("head"), "the mapping keeps the old contents");
+    file_unmap(map);
+
+    int fd;
+    test_check(test, file_open_append(file, &fd, &err) == ERR_OK, "open for appending");
+    test_check(test, file_write(fd, S("+tail"), &err) == ERR_OK, "append");
+    char start[8] = { 0 };
+    size_t got;
+    test_check(test, file_pread(fd, start, 8, 0, &got, &err) == ERR_OK && got == 8, "read from the start");
+    test_check_str(test, (String){ start, got }, S("replaced"), "reading is not appending");
+    file_close(fd);
+    String contents;
+    test_check(test, file_read_all(a, file, &contents, &err) == ERR_OK, "read it back");
+    test_check_str(test, contents, S("replaced+tail"), "writes land at the end");
+
+    String empty = path_join(a, dir, S("empty"));
+    test_check(test, file_write_all(empty, S(""), 0600, &err) == ERR_OK, "an empty file");
+    test_check(test, file_map(empty, &map, &err) == ERR_OK && map.data == nullptr && map.len == 0,
+               "an empty file maps to nothing");
+    file_unmap(map);
+    String missing = path_join(a, dir, S("missing"));
+    test_check(test, file_map(missing, &map, &err) == ERR_NOT_FOUND, "mapping a missing file");
+    test_check(test, file_open_append(missing, &fd, &err) == ERR_NOT_FOUND, "appending needs the file");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
+typedef struct {
+    int fd;
+    size_t got;
+    Error result;
+} Receiver;
+
+static void *receive_until_shutdown(void *argument)
+{
+    Receiver *receiver = argument;
+    char buffer[16];
+    receiver->result = net_receive(receiver->fd, buffer, sizeof buffer, &receiver->got, nullptr);
+    return nullptr;
+}
+
+static void unix_sockets_carry_bytes(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    String path = path_join(a, dir, S("s.sock"));
+    int listener;
+    test_check(test, net_listen_unix(path, 0600, &listener, &err) == ERR_OK, "listen");
+    FileInfo info;
+    test_check(test, file_info(path, &info, &err) == ERR_OK && info.exists && (info.mode & 0777) == 0600,
+               "the socket gets the mode");
+    int other;
+    test_check(test, net_listen_unix(path, 0600, &other, &err) == ERR_IO, "a taken path");
+    test_check(test, net_listen_unix(str_repeat(a, S("x"), 200), 0600, &other, &err) == ERR_INVALID_ARGUMENT,
+               "a path too long for a socket");
+
+    int client;
+    test_check(test, net_connect_unix(path, &client, &err) == ERR_OK, "connect");
+    int server;
+    test_check(test, net_accept(listener, 1000, &server), "accept");
+    test_check(test, net_send(client, S("ping"), &err) == ERR_OK, "send");
+    char buffer[16];
+    size_t got;
+    test_check(test, net_receive(server, buffer, sizeof buffer, &got, &err) == ERR_OK, "receive");
+    test_check_str(test, (String){ buffer, got }, S("ping"), "the bytes arrive");
+
+    Receiver receiver = { .fd = server, .got = 99 };
+    Thread thread;
+    test_check(test, thread_start(&thread, receive_until_shutdown, &receiver, &err) == ERR_OK, "start a receiver");
+    clock_sleep_ms(20);
+    net_shutdown(server);
+    thread_join(&thread);
+    test_check(test, receiver.result == ERR_OK && receiver.got == 0, "shutdown wakes a blocked receive");
+
+    net_close(server);
+    Error sent = ERR_OK;
+    for (int i = 0; i < 100 && sent == ERR_OK; i++) {
+        sent = net_send(client, S("data"), nullptr);
+    }
+    test_check(test, sent == ERR_NETWORK, "sending to a closed peer fails without SIGPIPE");
+    net_close(client);
+    net_close(listener);
+    test_check(test, net_connect_unix(path, &client, &err) == ERR_NETWORK, "nothing listens any more");
+    test_check(test, process_user_id() >= 0, "a user id");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
 const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
@@ -321,5 +466,8 @@ const TestCase PLATFORM_TESTS[] = {
     { "threads_share_state_under_a_mutex", threads_share_state_under_a_mutex },
     { "clock_moves_forward", clock_moves_forward },
     { "network_rejects_a_bad_address", network_rejects_a_bad_address },
+    { "dir_read_describes_each_entry", dir_read_describes_each_entry },
+    { "files_map_and_append", files_map_and_append },
+    { "unix_sockets_carry_bytes", unix_sockets_carry_bytes },
     { nullptr, nullptr },
 };
