@@ -1,5 +1,6 @@
 #include "mc/text/str.h"
 
+#include <stdckdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -514,13 +515,15 @@ StringBuilder str_builder_create(Arena *arena, size_t capacity)
     return (StringBuilder){ .arena = arena, .data = push_text(arena, capacity), .len = 0, .capacity = capacity };
 }
 
-// reserve keeps room for extra bytes and the terminator.
+// reserve keeps room for extra bytes and the terminator. Appends call it for
+// every piece, so the common case, room to spare, is checked inline.
 static void reserve(StringBuilder *builder, size_t extra)
 {
-    size_t needed = arena_size_add(arena_size_add(builder->len, extra), 1);
-    if (needed <= builder->capacity) {
+    size_t needed;
+    if (!ckd_add(&needed, builder->len, extra) && needed < builder->capacity) {
         return;
     }
+    needed = arena_size_add(arena_size_add(builder->len, extra), 1);
     size_t capacity = max_size(needed, arena_size_mul(builder->capacity, 2));
     char *data = push_text(builder->arena, capacity);
     copy_bytes(data, (String){ .data = builder->data, .len = builder->len });
