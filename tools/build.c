@@ -418,6 +418,10 @@ static int build_and_run_tests(const Build *build)
         command_push(&command, library);
         command_push(&command, "-lpthread");
         command_push(&command, "-lm");
+#ifdef __APPLE__
+        command_push(&command, "-framework");
+        command_push(&command, "CoreServices");
+#endif
         command_push(&command, "-o");
         command_push(&command, binary);
         run_or_die(&command);

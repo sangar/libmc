@@ -3,6 +3,7 @@
 #include <stdatomic.h>
 
 #include "mc/concurrency/cancel.h"
+#include "mc/concurrency/debounce.h"
 #include "mc/concurrency/queue.h"
 #include "mc/concurrency/threadpool.h"
 
@@ -205,6 +206,77 @@ static void threads_run_each_runs_every_index(Test *test)
     test_check(test, squares[0] == 0 && squares[7] == 49, "each job got its index");
 }
 
+typedef struct {
+    Mutex mutex;
+    Cond fired;
+    Arena *arena;
+    StringList keys;
+    int64_t fired_ns;
+} Firings;
+
+static void record_firing(void *context, String key)
+{
+    Firings *firings = context;
+    mutex_lock(&firings->mutex);
+    strlist_push(firings->arena, &firings->keys, str_copy(firings->arena, key));
+    firings->fired_ns = clock_monotonic_ns();
+    cond_broadcast(&firings->fired);
+    mutex_unlock(&firings->mutex);
+}
+
+static bool await_firings(Firings *firings, size_t count)
+{
+    int64_t deadline = clock_monotonic_ns() + 5LL * NS_PER_SECOND;
+    mutex_lock(&firings->mutex);
+    while (firings->keys.count < count && clock_monotonic_ns() < deadline) {
+        cond_wait_until(&firings->fired, &firings->mutex, deadline);
+    }
+    bool reached = firings->keys.count >= count;
+    mutex_unlock(&firings->mutex);
+    return reached;
+}
+
+static void debounce_fires_each_key_once_after_quiet(Test *test)
+{
+    Firings firings = { .arena = test->arena };
+    mutex_init(&firings.mutex);
+    cond_init(&firings.fired);
+    Debouncer *debouncer;
+    const int64_t delay = 40 * NS_PER_MILLISECOND;
+    if (debounce_create(delay, record_firing, &firings, &debouncer, nullptr) != ERR_OK) {
+        test_check(test, false, "create a debouncer");
+        return;
+    }
+    int64_t last_trigger = 0;
+    for (int i = 0; i < 4; i++) {
+        debounce_trigger(debouncer, S("a"));
+        last_trigger = clock_monotonic_ns();
+        clock_sleep_ms(10);
+    }
+    debounce_trigger(debouncer, S("b"));
+    test_check(test, debounce_pending(debouncer) == 2, "two keys wait");
+    test_check(test, await_firings(&firings, 2), "both keys fire");
+    clock_sleep_ms(80);
+    mutex_lock(&firings.mutex);
+    test_check_str(test, str_join(test->arena, firings.keys, S(",")), S("a,b"), "each key fires once");
+    mutex_unlock(&firings.mutex);
+    test_check(test, firings.fired_ns - last_trigger >= delay, "a retrigger pushes the deadline back");
+    test_check(test, debounce_pending(debouncer) == 0, "nothing waits after firing");
+
+    debounce_trigger(debouncer, S("again"));
+    test_check(test, await_firings(&firings, 3), "a key can fire again after the waiting keys were reset");
+    debounce_destroy(debouncer);
+
+    Debouncer *dropping;
+    test_check(test, debounce_create(10LL * NS_PER_SECOND, record_firing, &firings, &dropping, nullptr) == ERR_OK,
+               "create another");
+    debounce_trigger(dropping, S("never"));
+    debounce_destroy(dropping);
+    test_check(test, firings.keys.count == 3, "destroying drops waiting keys");
+    cond_destroy(&firings.fired);
+    mutex_destroy(&firings.mutex);
+}
+
 const TestCase CONCURRENCY_TESTS[] = {
     { "cancel_wakes_sleepers", cancel_wakes_sleepers },
     { "queue_keeps_order_across_growth", queue_keeps_order_across_growth },
@@ -212,5 +284,6 @@ const TestCase CONCURRENCY_TESTS[] = {
     { "queue_close_races_producers", queue_close_races_producers },
     { "threadpool_runs_tasks_and_chunks", threadpool_runs_tasks_and_chunks },
     { "threads_run_each_runs_every_index", threads_run_each_runs_every_index },
+    { "debounce_fires_each_key_once_after_quiet", debounce_fires_each_key_once_after_quiet },
     { nullptr, nullptr },
 };

@@ -41,5 +41,6 @@ extern const TestCase PLATFORM_TESTS[];
 extern const TestCase CONCURRENCY_TESTS[];
 extern const TestCase ENCODING_TESTS[];
 extern const TestCase LOG_TESTS[];
+extern const TestCase WATCH_TESTS[];
 extern const TestCase SERVICE_TESTS[];
 extern const AbortCase ABORT_CASES[];
