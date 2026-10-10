@@ -227,6 +227,31 @@ static void yaml_reads_block_and_flow_collections(Test *test)
                "the input need not be NUL-terminated");
 }
 
+static String source_of(String text, const Node *node)
+{
+    return str_slice(text, node->offset, node->offset + node->length);
+}
+
+static void yaml_nodes_know_where_they_are_in_the_source(Test *test)
+{
+    String text = S("# roles\n"
+                    "stores:\n"
+                    "  home:\n"
+                    "    role: primary   # the one written first\n"
+                    "  nas: {role: 'mirror'}\n");
+    Node *root = parse_yaml(test, text.data);
+    if (root == nullptr) {
+        return;
+    }
+    const Node *stores = node_get(root, S("stores"));
+    const Node *home = node_get(node_get(stores, S("home")), S("role"));
+    const Node *nas = node_get(node_get(stores, S("nas")), S("role"));
+    test_check(test, home->line == 4 && nas->line == 5, "each node has its line");
+    test_check_str(test, source_of(text, home), S("primary"), "a plain scalar spans its text");
+    test_check_str(test, source_of(text, nas), S("mirror"), "a quoted scalar spans what is inside its quotes");
+    test_check(test, node_scalar(test->arena, NODE_STRING, S("made"))->line == 0, "a node made in code has none");
+}
+
 static void yaml_rejects_malformed_input(Test *test)
 {
     const char *const invalid[] = {
@@ -258,6 +283,7 @@ const TestCase ENCODING_TESTS[] = {
     { "json_floats_ignore_the_locale", json_floats_ignore_the_locale },
     { "yaml_types_scalars_by_the_core_schema", yaml_types_scalars_by_the_core_schema },
     { "yaml_reads_block_and_flow_collections", yaml_reads_block_and_flow_collections },
+    { "yaml_nodes_know_where_they_are_in_the_source", yaml_nodes_know_where_they_are_in_the_source },
     { "yaml_rejects_malformed_input", yaml_rejects_malformed_input },
     { nullptr, nullptr },
 };
