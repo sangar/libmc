@@ -54,7 +54,7 @@ static const char *const WARNING_FLAGS[] = {
 };
 static const char *const DEBUG_FLAGS[] = { "-g", "-O0", "-fsanitize=address,undefined", "-fno-omit-frame-pointer" };
 static const char *const RELEASE_FLAGS[] = { "-O2", "-DNDEBUG" };
-static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency" };
+static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log" };
 
 static void command_push(Command *command, const char *item)
 {

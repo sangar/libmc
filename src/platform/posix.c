@@ -6,9 +6,12 @@
 
 #include "mc/text/path.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <locale.h>
+#include <math.h>
 #include <netdb.h>
 #include <poll.h>
 #include <pthread.h>
@@ -28,6 +31,7 @@
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <xlocale.h>
 #endif
 
 extern char **environ;
@@ -116,6 +120,75 @@ int32_t clock_local_offset(int64_t unix_seconds)
         return 0;
     }
     return (int32_t)local.tm_gmtoff;
+}
+
+// ---- numbers ----
+
+enum { FLOAT_TEXT_LIMIT = 64, FLOAT_MAX_DIGITS = 17 };
+
+// One C locale serves the whole process; creating it per call would allocate.
+static locale_t c_locale_value; // modern-c: allow global-mutable
+static pthread_once_t c_locale_once = PTHREAD_ONCE_INIT; // modern-c: allow global-mutable
+
+static void create_c_locale(void)
+{
+    c_locale_value = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+    if (c_locale_value == (locale_t)0) {
+        abort();
+    }
+}
+
+// c_locale is used through uselocale, since glibc has no snprintf_l.
+static locale_t c_locale(void)
+{
+    pthread_once(&c_locale_once, create_c_locale);
+    return c_locale_value;
+}
+
+static bool parse_terminated(const char *text, size_t len, double *value)
+{
+    locale_t previous = uselocale(c_locale());
+    errno = 0;
+    char *end;
+    double parsed = strtod(text, &end);
+    bool overflow = errno == ERANGE && (parsed == HUGE_VAL || parsed == -HUGE_VAL);
+    uselocale(previous);
+    if (end != text + len || overflow) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+bool float_parse(String text, double *value)
+{
+    if (text.len == 0 || isspace((unsigned char)text.data[0])) {
+        return false;
+    }
+    if (text.len >= FLOAT_TEXT_LIMIT) {
+        Arena *scratch = arena_create(0);
+        bool parsed = parse_terminated(str_cstr(scratch, text), text.len, value);
+        arena_destroy(scratch);
+        return parsed;
+    }
+    char buffer[FLOAT_TEXT_LIMIT];
+    memcpy(buffer, text.data, text.len);
+    buffer[text.len] = '\0';
+    return parse_terminated(buffer, text.len, value);
+}
+
+String float_format(Arena *arena, double value)
+{
+    char buffer[FLOAT_TEXT_LIMIT];
+    locale_t previous = uselocale(c_locale());
+    for (int digits = 1; digits <= FLOAT_MAX_DIGITS; digits++) {
+        snprintf(buffer, sizeof buffer, "%.*g", digits, value);
+        if (strtod(buffer, nullptr) == value) {
+            break;
+        }
+    }
+    uselocale(previous);
+    return str_copy(arena, S(buffer));
 }
 
 // ---- threads ----

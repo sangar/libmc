@@ -4,6 +4,8 @@
 #include "mc/text/glob.h"
 #include "mc/text/path.h"
 #include "mc/crypto/sha256.h"
+#include "mc/crypto/sigv4.h"
+#include "mc/text/table.h"
 #include "mc/container/sort.h"
 #include "mc/text/utf8.h"
 
@@ -190,6 +192,74 @@ static void sort_orders_and_selects(Test *test)
     test_check(test, stable, "equal keys keep their order");
 }
 
+static void table_aligns_columns(Test *test)
+{
+    Table table = table_create(test->arena);
+    table_row(&table, 3, (String[]){ S("NAME"), S("ROLE"), S("LAG") });
+    table_row(&table, 3, (String[]){ S("blåbær"), S("leader"), S("0") });
+    table_row(&table, 3, (String[]){ S("db-2"), S("replica"), S("12") });
+    table_row(&table, 1, (String[]){ S("a single cell ends the block") });
+    table_row(&table, 2, (String[]){ S("x"), S("y") });
+    test_check_str(test, table_format(&table),
+                   S("NAME    ROLE     LAG\n"
+                     "blåbær  leader   0\n"
+                     "db-2    replica  12\n"
+                     "a single cell ends the block\n"
+                     "x  y\n"),
+                   "columns align by code points within each block");
+}
+
+static void sigv4_signs_like_aws(Test *test)
+{
+    Arena *a = test->arena;
+    test_check_str(test, sigv4_date(a, 1440938160), S("20150830T123600Z"), "the X-Amz-Date form");
+    SigV4Request list_users = {
+        .method = S("GET"),
+        .path = S("/"),
+        .query = S("Action=ListUsers&Version=2010-05-08"),
+        .host = S("iam.amazonaws.com"),
+        .amz_date = S("20150830T123600Z"),
+        .headers = strlist_of(a, 1, (const char *const[]){ "Content-Type: application/x-www-form-urlencoded; charset=utf-8" }),
+        .payload_hash = sigv4_payload_hash(a, S("")),
+    };
+    SigV4Credentials example = {
+        .access_key = S("AKIDEXAMPLE"),
+        .secret_key = S("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"),
+        .region = S("us-east-1"),
+        .service = S("iam"),
+    };
+    test_check_str(test, sigv4_authorization(a, list_users, example),
+                   S("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, "
+                     "SignedHeaders=content-type;host;x-amz-date, "
+                     "Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7"),
+                   "the example from the AWS documentation");
+
+    String body_hash = sigv4_payload_hash(a, S("hello"));
+    SigV4Request put = {
+        .method = S("PUT"),
+        .path = S("/bucket/a%20b.txt"),
+        .host = S("localhost:9000"),
+        .amz_date = S("20261010T120000Z"),
+        .headers = strlist_of(a, 3,
+                              (const char *const[]){ str_cstr(a, str_concat(a, S("X-Amz-Content-SHA256:"), body_hash)),
+                                                     "x-amz-meta-x: 1", "x-amz-meta:  a   b " }),
+        .payload_hash = body_hash,
+    };
+    SigV4Credentials store = { S("access"), S("secret"), S("us-east-1"), S("s3") };
+    test_check_str(test, sigv4_authorization(a, put, store),
+                   S("AWS4-HMAC-SHA256 Credential=access/20261010/us-east-1/s3/aws4_request, "
+                     "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-meta;x-amz-meta-x, "
+                     "Signature=9611270eeec626080b357f5fceed3809edef0fe6974d1912f4df91224ded51aa"),
+                   "header names sort by name and values are trimmed");
+
+    put.headers = strlist_of(a, 2, (const char *const[]){ "x-amz-meta-tag: a", "X-Amz-Meta-Tag: b" });
+    String repeated = sigv4_authorization(a, put, store);
+    put.headers = strlist_of(a, 1, (const char *const[]){ "x-amz-meta-tag: a,b" });
+    test_check_str(test, repeated, sigv4_authorization(a, put, store), "a repeated header signs as one, values joined");
+    test_check(test, str_contains(repeated, S("SignedHeaders=host;x-amz-date;x-amz-meta-tag,")),
+               "a repeated header is signed once");
+}
+
 const TestCase TEXT_TESTS[] = {
     { "utf8_roundtrip_and_validation", utf8_roundtrip_and_validation },
     { "glob_matches_paths", glob_matches_paths },
@@ -198,5 +268,7 @@ const TestCase TEXT_TESTS[] = {
     { "fmt_times_and_numbers", fmt_times_and_numbers },
     { "sha256_known_vectors", sha256_known_vectors },
     { "sort_orders_and_selects", sort_orders_and_selects },
+    { "table_aligns_columns", table_aligns_columns },
+    { "sigv4_signs_like_aws", sigv4_signs_like_aws },
     { nullptr, nullptr },
 };

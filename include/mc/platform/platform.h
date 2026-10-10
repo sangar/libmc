@@ -18,6 +18,15 @@ void clock_sleep_ms(int64_t milliseconds);
 // clock_local_offset is the local zone's offset from UTC in seconds east, at a Unix time.
 int32_t clock_local_offset(int64_t unix_seconds);
 
+// ---- numbers ----
+
+// float_parse reads the whole of text as a floating-point number with '.'
+// as the decimal point, whatever locale the program has set. A value too
+// large for a double is false.
+bool float_parse(String text, double *value);
+// float_format writes the shortest text that float_parse reads back as value.
+String float_format(Arena *arena, double value);
+
 // ---- threads ----
 
 typedef struct Mutex {

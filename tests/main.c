@@ -86,7 +86,8 @@ int main(int argc, char **argv)
     if (thread_start(&watchdog, fail_after_timeout, nullptr, nullptr) == ERR_OK) {
         thread_detach(&watchdog);
     }
-    const TestCase *tables[] = { ARENA_TESTS, STR_TESTS, STRMAP_TESTS, TEXT_TESTS, PLATFORM_TESTS, CONCURRENCY_TESTS };
+    const TestCase *tables[] = { ARENA_TESTS, STR_TESTS, STRMAP_TESTS, TEXT_TESTS, PLATFORM_TESTS, CONCURRENCY_TESTS,
+                                   ENCODING_TESTS, LOG_TESTS };
     unsigned failed = 0;
     unsigned checks = 0;
     for (size_t i = 0; i < countof(tables); i++) {

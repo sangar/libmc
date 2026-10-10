@@ -1,14 +1,15 @@
 # libmc
 
-A small foundation library for C: arenas, length-carrying strings, one error model, containers, text utilities and a portable platform layer. It builds to a single static library, `libmc.a`, with a plain C ABI, so it can be linked from C, C++ and any language with a C foreign function interface.
+A small foundation library for C: arenas, length-carrying strings, one error model, containers, text utilities, JSON, structured logging and a portable platform layer. It builds to a single static library, `libmc.a`, with a plain C ABI, so it can be linked from C, C++ and any language with a C foreign function interface.
 
 ## Features
 
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **No dependencies** beyond libc and pthreads, and no global state.
+- **No dependencies** beyond libc and pthreads, and no global state for the caller to manage.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals and sockets.
+- **JSON** parsing into a document tree and encoding back, with numbers read the same whatever locale the program set.
 
 ## Requirements
 
@@ -103,7 +104,7 @@ The library exports plain C functions and fixed-layout structs, so any language 
 - **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`.
 - **Errors.** A function that can fail for reasons outside the caller's control, such as I/O, the network or a child process, returns `Error` and is marked `[[nodiscard]]`. Results come back through out-parameters. The last parameter is an optional `Err *` that receives a human-readable message; pass `nullptr` to ignore it. Parsers and lookups, for which "no" is an ordinary answer, return `bool` instead. Running out of memory, an allocation size that overflows, or a failed mutex or condition variable call aborts.
 - **Ownership is in the signature.** A function that allocates takes an `Arena *`. A function without one returns a view or nothing.
-- **No global state.** The one exception is `env_set`, which changes the process environment. `process_run` blocks `SIGPIPE` only in the calling thread while it feeds the child, and discards any `SIGPIPE` that leaves pending.
+- **No global state.** The exceptions are `env_set`, which changes the process environment, and the C locale that `float_parse` and `float_format` create once and share. `process_run` blocks `SIGPIPE` only in the calling thread while it feeds the child, and discards any `SIGPIPE` that leaves pending.
 
 ## Modules
 
@@ -119,14 +120,19 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/text/glob.h` | Glob matching with `**` and character classes |
 | | `mc/text/path.h` | Lexical path handling: join, clean, base, dir, ext, relative |
 | | `mc/text/fmt.h` | Go-style durations, RFC 3339 timestamps, thousands separators, byte sizes |
+| | `mc/text/table.h` | Aligned columns like Go's tabwriter |
 | container | `mc/container/strmap.h` | String-keyed open-addressing hash map with removal |
 | | `mc/container/hash.h` | FNV-1a hashing |
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
-| platform | `mc/platform/platform.h` | Clock, threads, files, directories, processes, environment, signals, sockets |
+| | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing |
+| platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files, directories, processes, environment, signals, sockets |
 | concurrency | `mc/concurrency/cancel.h` | Cancellation token with waits and sleeps that wake on cancel |
 | | `mc/concurrency/queue.h` | Unbounded blocking FIFO of pointers, with close and timeouts |
 | | `mc/concurrency/threadpool.h` | Thread pool, chunked parallel loops, and one thread per job |
+| encoding | `mc/encoding/node.h` | Document tree of scalars, sequences and mappings shared by the parsers |
+| | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting |
+| log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 
 The header comments document each function's contract.
 
@@ -134,9 +140,7 @@ The header comments document each function's contract.
 
 - File watching on FSEvents and inotify, with debouncing
 - User service registration for launchd and systemd
-- JSON and YAML parsing into one document tree
-- Structured logging and aligned table output
-- AWS SigV4 request signing
+- YAML parsing into the same document tree as JSON
 - HTTP client
 
 ## License
