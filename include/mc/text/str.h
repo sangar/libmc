@@ -29,6 +29,9 @@ bool str_equal(String a, String b);
 bool str_equal_ignore_case(String a, String b);
 // str_compare orders bytewise, a shorter prefix first, like strcmp.
 int str_compare(String a, String b);
+// str_compare_ignore_case orders as str_compare would after folding ASCII
+// letters to lower case, so "Readme" sorts between "rat" and "rest".
+int str_compare_ignore_case(String a, String b);
 bool str_starts_with(String s, String prefix);
 bool str_ends_with(String s, String suffix);
 bool str_contains(String s, String needle);

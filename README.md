@@ -8,7 +8,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
 - **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The one vendored library, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, is pinned in `deps.lock` and builds into `libmc.a`.
-- **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching and login services.
+- **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services and the terminal.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
 ## Requirements
@@ -125,13 +125,15 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/text/fmt.h` | Go-style durations, RFC 3339 timestamps, thousands separators, byte sizes |
 | | `mc/text/table.h` | Aligned columns like Go's tabwriter |
 | container | `mc/container/strmap.h` | String-keyed open-addressing hash map with removal |
+| | `mc/container/idtable.h` | Hash set of ids whose keys live elsewhere, four bytes a slot |
 | | `mc/container/hash.h` | FNV-1a hashing |
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
 | | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing |
-| platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files, directories, processes, environment, signals, sockets |
+| platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files and mappings, directories with metadata, processes, environment, signals, TCP and Unix sockets |
 | | `mc/platform/watch.h` | Recursive file watching on FSEvents and inotify, in settled batches of paths |
 | | `mc/platform/service.h` | Per-user login services: launchd agents and systemd user units |
+| | `mc/platform/terminal.h` | The controlling terminal in raw mode, its size, and waits that wake on input, resizes or another thread |
 | concurrency | `mc/concurrency/cancel.h` | Cancellation token with waits and sleeps that wake on cancel |
 | | `mc/concurrency/debounce.h` | Per-key debouncing: a callback once a key has been quiet for a delay |
 | | `mc/concurrency/queue.h` | Unbounded blocking FIFO of pointers, with close and timeouts |

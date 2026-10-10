@@ -1,5 +1,6 @@
 #include "mc/text/str.h"
 
+#include <stdckdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,19 @@ int str_compare(String a, String b)
     int order = common > 0 ? memcmp(a.data, b.data, common) : 0;
     if (order != 0) {
         return order;
+    }
+    return a.len < b.len ? -1 : a.len > b.len ? 1 : 0;
+}
+
+int str_compare_ignore_case(String a, String b)
+{
+    size_t common = min_size(a.len, b.len);
+    for (size_t i = 0; i < common; i++) {
+        unsigned char x = (unsigned char)lower_ascii(a.data[i]);
+        unsigned char y = (unsigned char)lower_ascii(b.data[i]);
+        if (x != y) {
+            return x < y ? -1 : 1;
+        }
     }
     return a.len < b.len ? -1 : a.len > b.len ? 1 : 0;
 }
@@ -501,13 +515,15 @@ StringBuilder str_builder_create(Arena *arena, size_t capacity)
     return (StringBuilder){ .arena = arena, .data = push_text(arena, capacity), .len = 0, .capacity = capacity };
 }
 
-// reserve keeps room for extra bytes and the terminator.
+// reserve keeps room for extra bytes and the terminator. Appends call it for
+// every piece, so the common case, room to spare, is checked inline.
 static void reserve(StringBuilder *builder, size_t extra)
 {
-    size_t needed = arena_size_add(arena_size_add(builder->len, extra), 1);
-    if (needed <= builder->capacity) {
+    size_t needed;
+    if (!ckd_add(&needed, builder->len, extra) && needed < builder->capacity) {
         return;
     }
+    needed = arena_size_add(arena_size_add(builder->len, extra), 1);
     size_t capacity = max_size(needed, arena_size_mul(builder->capacity, 2));
     char *data = push_text(builder->arena, capacity);
     copy_bytes(data, (String){ .data = builder->data, .len = builder->len });

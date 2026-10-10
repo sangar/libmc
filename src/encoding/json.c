@@ -356,12 +356,27 @@ Error json_parse(Arena *arena, String text, Node **root, Err *err)
     return ERR_OK;
 }
 
+// needs_no_escape is true for the ASCII bytes a JSON string holds as they are.
+static bool needs_no_escape(unsigned char c)
+{
+    return c >= 0x20 && c < 0x80 && c != '"' && c != '\\';
+}
+
 void json_append_quoted(StringBuilder *builder, String s)
 {
     static const char hex[] = "0123456789abcdef";
     str_builder_append_char(builder, '"');
     size_t at = 0;
     while (at < s.len) {
+        size_t plain = at;
+        while (plain < s.len && needs_no_escape((unsigned char)s.data[plain])) {
+            plain++;
+        }
+        if (plain > at) {
+            str_builder_append(builder, str_slice(s, at, plain));
+            at = plain;
+            continue;
+        }
         unsigned char c = (unsigned char)s.data[at];
         if (c >= 0x80) {
             size_t start = at;
