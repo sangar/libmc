@@ -100,6 +100,25 @@ bool utf8_is_valid(String s)
     return true;
 }
 
+String utf8_from_latin1(Arena *arena, String latin1)
+{
+    size_t high = 0;
+    for (size_t i = 0; i < latin1.len; i++) {
+        high += (unsigned char)latin1.data[i] >= 0x80;
+    }
+    char *out = arena_push_aligned(arena, arena_size_add(arena_size_add(latin1.len, high), 1), 1);
+    size_t len = 0;
+    for (size_t i = 0; i < latin1.len; i++) {
+        unsigned char byte = (unsigned char)latin1.data[i];
+        if (byte < 0x80) {
+            out[len++] = (char)byte;
+        } else {
+            len += utf8_encode(byte, out + len);
+        }
+    }
+    return (String){ .data = out, .len = len };
+}
+
 size_t utf8_count(String s)
 {
     size_t count = 0;
