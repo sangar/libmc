@@ -59,6 +59,19 @@ int str_compare(String a, String b)
     return a.len < b.len ? -1 : a.len > b.len ? 1 : 0;
 }
 
+int str_compare_ignore_case(String a, String b)
+{
+    size_t common = min_size(a.len, b.len);
+    for (size_t i = 0; i < common; i++) {
+        unsigned char x = (unsigned char)lower_ascii(a.data[i]);
+        unsigned char y = (unsigned char)lower_ascii(b.data[i]);
+        if (x != y) {
+            return x < y ? -1 : 1;
+        }
+    }
+    return a.len < b.len ? -1 : a.len > b.len ? 1 : 0;
+}
+
 bool str_starts_with(String s, String prefix)
 {
     return s.len >= prefix.len && str_equal(str_slice(s, 0, prefix.len), prefix);
