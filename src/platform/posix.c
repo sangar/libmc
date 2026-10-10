@@ -22,16 +22,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <sys/attr.h>
 #include <xlocale.h>
+// Cross builds use zig's macOS headers, which leave out sys/vnode.h; its
+// object types are a fixed part of the getattrlistbulk ABI.
+#if __has_include(<sys/vnode.h>)
+#include <sys/vnode.h>
+#else
+enum { VREG = 1, VDIR = 2, VLNK = 5 };
+#endif
 #endif
 
 extern char **environ;
@@ -320,12 +330,27 @@ size_t thread_cpu_count(void)
 
 // ---- files ----
 
+static int64_t timespec_ns(struct timespec time)
+{
+    return (int64_t)time.tv_sec * NS_PER_SECOND + time.tv_nsec;
+}
+
 static int64_t mtime_ns(const struct stat *st)
 {
 #ifdef __APPLE__
-    return (int64_t)st->st_mtimespec.tv_sec * NS_PER_SECOND + st->st_mtimespec.tv_nsec;
+    return timespec_ns(st->st_mtimespec);
 #else
-    return (int64_t)st->st_mtim.tv_sec * NS_PER_SECOND + st->st_mtim.tv_nsec;
+    return timespec_ns(st->st_mtim);
+#endif
+}
+
+static int64_t birth_ns(const struct stat *st)
+{
+#ifdef __APPLE__
+    return timespec_ns(st->st_birthtimespec);
+#else
+    unused(st);
+    return 0;
 #endif
 }
 
@@ -338,6 +363,7 @@ static FileInfo describe(const struct stat *st)
         .is_symlink = S_ISLNK(st->st_mode),
         .size = (int64_t)st->st_size,
         .mtime_ns = mtime_ns(st),
+        .birth_ns = birth_ns(st),
         .mode = (unsigned)(st->st_mode & 07777),
     };
 }
@@ -398,6 +424,18 @@ Error file_open_read(String path, int *fd, Err *err)
         return e;
     }
     *fd = open(cpath.text, O_RDONLY | O_CLOEXEC);
+    return *fd >= 0 ? ERR_OK : fail_errno(err, "open %s", cpath.text);
+}
+
+Error file_open_append(String path, int *fd, Err *err)
+{
+    *fd = -1;
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    *fd = open(cpath.text, O_RDWR | O_APPEND | O_CLOEXEC);
     return *fd >= 0 ? ERR_OK : fail_errno(err, "open %s", cpath.text);
 }
 
@@ -622,6 +660,38 @@ Error file_write_atomic(String path, String contents, unsigned mode, Err *err)
     return e;
 }
 
+Error file_map(String path, FileMap *map, Err *err)
+{
+    *map = (FileMap){ 0 };
+    int fd;
+    Error e = file_open_read(path, &fd, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    struct stat st;
+    void *data = nullptr;
+    if (fstat(fd, &st) != 0) {
+        e = fail_errno(err, "stat %.*s", (int)path.len, path.data);
+    } else if (st.st_size > 0) {
+        data = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (data == MAP_FAILED) {
+            e = fail_errno(err, "map %.*s", (int)path.len, path.data);
+        }
+    }
+    close(fd);
+    if (e == ERR_OK && data != nullptr) {
+        *map = (FileMap){ data, (size_t)st.st_size };
+    }
+    return e;
+}
+
+void file_unmap(FileMap map)
+{
+    if (map.data != nullptr) {
+        munmap((void *)map.data, map.len);
+    }
+}
+
 // ---- directories ----
 
 // make_directory succeeds when path ends up a directory, following symlinks.
@@ -757,6 +827,155 @@ Error dir_list(Arena *arena, String path, StringList *names, Err *err)
     strlist_sort(&found);
     strlist_push_all(arena, names, found);
     return ERR_OK;
+}
+
+static void append_entry(Arena *arena, DirEntryList *entries, const char *name, FileInfo info)
+{
+    entries->items = arena_grow(arena, entries->items, &entries->capacity, entries->count, sizeof *entries->items);
+    entries->items[entries->count++] = (DirEntry){ str_copy(arena, S(name)), info };
+}
+
+[[nodiscard]] static Error read_dir_portable(Arena *arena, int dir_fd, const char *cpath, DirEntryList *entries,
+                                             Err *err)
+{
+    int fd = dup(dir_fd);
+    DIR *dir = fd >= 0 ? fdopendir(fd) : nullptr;
+    if (dir == nullptr) {
+        Error e = fail_errno(err, "open directory %s", cpath);
+        if (fd >= 0) {
+            close(fd);
+        }
+        return e;
+    }
+    Error e = ERR_OK;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (entry == nullptr) {
+            if (errno != 0) {
+                e = fail_errno(err, "read directory %s", cpath);
+            }
+            break;
+        }
+        struct stat st;
+        if (!is_dot_or_dot_dot(entry->d_name) && fstatat(dir_fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            append_entry(arena, entries, entry->d_name, describe(&st));
+        }
+    }
+    closedir(dir);
+    return e;
+}
+
+#ifdef __APPLE__
+// read_dir_bulk packs the attributes of many entries into one buffer per
+// call. They come in the order of their bits, except the error, which follows
+// the returned-attribute set, and one the file system does not return is
+// absent rather than zero. *unsupported asks for read_dir_portable instead.
+[[nodiscard]] static Error read_dir_bulk(Arena *arena, int dir_fd, const char *cpath, DirEntryList *entries,
+                                         bool *unsupported, Err *err)
+{
+    struct attrlist request = {
+        .bitmapcount = ATTR_BIT_MAP_COUNT,
+        .commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_ERROR | ATTR_CMN_OBJTYPE | ATTR_CMN_CRTIME |
+                      ATTR_CMN_MODTIME | ATTR_CMN_ACCESSMASK,
+        .fileattr = ATTR_FILE_DATALENGTH,
+    };
+    alignas(8) char buffer[64 * 1024];
+    *unsupported = false;
+    for (bool first = true;; first = false) {
+        int count = getattrlistbulk(dir_fd, &request, buffer, sizeof buffer, 0);
+        if (count < 0) {
+            *unsupported = first && (errno == ENOTSUP || errno == EINVAL);
+            return *unsupported ? ERR_OK : fail_errno(err, "read directory %s", cpath);
+        }
+        if (count == 0) {
+            return ERR_OK;
+        }
+        const char *next = buffer;
+        for (int i = 0; i < count; i++) {
+            const char *p = next;
+            uint32_t length;
+            memcpy(&length, p, sizeof length);
+            next += length;
+            p += sizeof length;
+            attribute_set_t returned;
+            memcpy(&returned, p, sizeof returned);
+            p += sizeof returned;
+            if (returned.commonattr & ATTR_CMN_ERROR) {
+                uint32_t error;
+                memcpy(&error, p, sizeof error);
+                p += sizeof error;
+                if (error != 0) {
+                    continue;
+                }
+            }
+            if (!(returned.commonattr & ATTR_CMN_NAME)) {
+                continue;
+            }
+            attrreference_t name;
+            memcpy(&name, p, sizeof name);
+            const char *name_text = p + name.attr_dataoffset;
+            p += sizeof name;
+            FileInfo info = { .exists = true };
+            if (returned.commonattr & ATTR_CMN_OBJTYPE) {
+                fsobj_type_t type;
+                memcpy(&type, p, sizeof type);
+                p += sizeof type;
+                info.is_dir = type == VDIR;
+                info.is_regular = type == VREG;
+                info.is_symlink = type == VLNK;
+            }
+            if (returned.commonattr & ATTR_CMN_CRTIME) {
+                struct timespec created;
+                memcpy(&created, p, sizeof created);
+                p += sizeof created;
+                info.birth_ns = timespec_ns(created);
+            }
+            if (returned.commonattr & ATTR_CMN_MODTIME) {
+                struct timespec modified;
+                memcpy(&modified, p, sizeof modified);
+                p += sizeof modified;
+                info.mtime_ns = timespec_ns(modified);
+            }
+            if (returned.commonattr & ATTR_CMN_ACCESSMASK) {
+                uint32_t mask;
+                memcpy(&mask, p, sizeof mask);
+                p += sizeof mask;
+                info.mode = mask & 07777;
+            }
+            if (returned.fileattr & ATTR_FILE_DATALENGTH) {
+                off_t size;
+                memcpy(&size, p, sizeof size);
+                info.size = (int64_t)size;
+            }
+            append_entry(arena, entries, name_text, info);
+        }
+    }
+}
+#endif
+
+Error dir_read(Arena *arena, String path, DirEntryList *entries, Err *err)
+{
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int fd = open(cpath.text, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return fail_errno(err, "open directory %s", cpath.text);
+    }
+#ifdef __APPLE__
+    bool unsupported;
+    e = read_dir_bulk(arena, fd, cpath.text, entries, &unsupported, err);
+    if (e == ERR_OK && unsupported) {
+        e = read_dir_portable(arena, fd, cpath.text, entries, err);
+    }
+#else
+    e = read_dir_portable(arena, fd, cpath.text, entries, err);
+#endif
+    close(fd);
+    return e;
 }
 
 Error dir_create_temp(Arena *arena, String prefix, String *path, Err *err)
@@ -1190,6 +1409,57 @@ int process_id(void)
     return (int)getpid();
 }
 
+int process_user_id(void)
+{
+    return (int)getuid();
+}
+
+static void *reap_child(void *argument)
+{
+    pid_t pid = (pid_t)(intptr_t)argument;
+    while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {
+    }
+    return nullptr;
+}
+
+Error process_open_default(String path, Err *err)
+{
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+#ifdef __APPLE__
+    char opener[] = "open";
+#else
+    char opener[] = "xdg-open";
+#endif
+    char *argv[] = { opener, cpath.text, nullptr };
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    int rc = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (rc == 0) {
+        rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    }
+    if (rc == 0) {
+        rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    }
+    pid_t pid;
+    if (rc == 0) {
+        rc = posix_spawnp(&pid, opener, &actions, nullptr, argv, environ);
+    }
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        return err_set(err, rc == ENOENT ? ERR_NOT_FOUND : ERR_PLATFORM, "start %s: %s", opener, strerror(rc));
+    }
+    // A thread waits for the opener so it does not linger as a zombie.
+    Thread reaper;
+    if (thread_start(&reaper, reap_child, (void *)(intptr_t)pid, nullptr) == ERR_OK) {
+        thread_detach(&reaper);
+    }
+    return ERR_OK;
+}
+
 bool process_alive(int pid)
 {
     return kill((pid_t)pid, 0) == 0 || errno == EPERM;
@@ -1479,4 +1749,110 @@ void net_close(int fd)
     if (fd >= 0) {
         close(fd);
     }
+}
+
+[[nodiscard]] static Error unix_address(String path, struct sockaddr_un *address, Err *err)
+{
+    *address = (struct sockaddr_un){ .sun_family = AF_UNIX };
+    if (path.len == 0 || memchr(path.data, '\0', path.len) != nullptr) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "unusable socket path: %.*s", (int)min_size(path.len, 200),
+                       path.data);
+    }
+    if (path.len >= sizeof address->sun_path) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "socket path %.*s is longer than %zu bytes", (int)path.len,
+                       path.data, sizeof address->sun_path - 1);
+    }
+    memcpy(address->sun_path, path.data, path.len);
+    return ERR_OK;
+}
+
+Error net_listen_unix(String path, unsigned mode, int *fd, Err *err)
+{
+    *fd = -1;
+    struct sockaddr_un address;
+    Error e = unix_address(path, &address, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return fail_errno(err, "listen %s", address.sun_path);
+    }
+    if (!prepare_socket(sock) || bind(sock, (struct sockaddr *)&address, sizeof address) != 0) {
+        e = fail_errno(err, "listen %s", address.sun_path);
+        close(sock);
+        return e;
+    }
+    if (chmod(address.sun_path, (mode_t)mode) != 0 || listen(sock, 64) != 0) {
+        e = fail_errno(err, "listen %s", address.sun_path);
+        close(sock);
+        unlink(address.sun_path);
+        return e;
+    }
+    *fd = sock;
+    return ERR_OK;
+}
+
+Error net_connect_unix(String path, int *fd, Err *err)
+{
+    *fd = -1;
+    struct sockaddr_un address;
+    Error e = unix_address(path, &address, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0 || !prepare_socket(sock) || connect(sock, (struct sockaddr *)&address, sizeof address) != 0) {
+        e = err_set(err, ERR_NETWORK, "connect %s: %s", address.sun_path, strerror(errno));
+        if (sock >= 0) {
+            close(sock);
+        }
+        return e;
+    }
+    *fd = sock;
+    return ERR_OK;
+}
+
+Error net_send(int fd, String data, Err *err)
+{
+#ifdef MSG_NOSIGNAL
+    int flags = MSG_NOSIGNAL;
+#else
+    int flags = 0;
+    if (!prepare_socket(fd)) {
+        return err_set(err, ERR_NETWORK, "send: %s", strerror(errno));
+    }
+#endif
+    size_t sent = 0;
+    while (sent < data.len) {
+        ssize_t n = send(fd, data.data + sent, data.len - sent, flags);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return err_set(err, ERR_NETWORK, "send: %s", strerror(errno));
+        }
+        sent += (size_t)n;
+    }
+    return ERR_OK;
+}
+
+Error net_receive(int fd, void *buffer, size_t capacity, size_t *got, Err *err)
+{
+    *got = 0;
+    for (;;) {
+        ssize_t n = recv(fd, buffer, capacity, 0);
+        if (n >= 0) {
+            *got = (size_t)n;
+            return ERR_OK;
+        }
+        if (errno != EINTR) {
+            return err_set(err, ERR_NETWORK, "receive: %s", strerror(errno));
+        }
+    }
+}
+
+void net_shutdown(int fd)
+{
+    shutdown(fd, SHUT_RDWR);
 }

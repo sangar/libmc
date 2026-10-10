@@ -36,6 +36,7 @@ typedef struct {
 extern const TestCase ARENA_TESTS[];
 extern const TestCase STR_TESTS[];
 extern const TestCase STRMAP_TESTS[];
+extern const TestCase IDTABLE_TESTS[];
 extern const TestCase TEXT_TESTS[];
 extern const TestCase PLATFORM_TESTS[];
 extern const TestCase CONCURRENCY_TESTS[];
