@@ -130,6 +130,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files, directories, processes, environment, signals, sockets |
 | | `mc/platform/service.h` | Per-user login services: launchd agents and systemd user units |
 | concurrency | `mc/concurrency/cancel.h` | Cancellation token with waits and sleeps that wake on cancel |
+| | `mc/concurrency/debounce.h` | Per-key debouncing: a callback once a key has been quiet for a delay |
 | | `mc/concurrency/queue.h` | Unbounded blocking FIFO of pointers, with close and timeouts |
 | | `mc/concurrency/threadpool.h` | Thread pool, chunked parallel loops, and one thread per job |
 | encoding | `mc/encoding/node.h` | Document tree of scalars, sequences and mappings shared by the parsers |
