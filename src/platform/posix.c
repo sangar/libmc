@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -1465,7 +1466,37 @@ bool process_alive(int pid)
     return kill((pid_t)pid, 0) == 0 || errno == EPERM;
 }
 
+Error process_raise_file_limit(Err *err)
+{
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return err_set(err, ERR_PLATFORM, "getrlimit: %s", strerror(errno));
+    }
+    if (limit.rlim_cur >= limit.rlim_max) {
+        return ERR_OK;
+    }
+    limit.rlim_cur = limit.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &limit) == 0) {
+        return ERR_OK;
+    }
+    // macOS rejects RLIM_INFINITY as the soft limit but takes a large finite one.
+    limit.rlim_cur = 1 << 20;
+    if (setrlimit(RLIMIT_NOFILE, &limit) == 0) {
+        return ERR_OK;
+    }
+    return err_set(err, ERR_PLATFORM, "setrlimit: %s", strerror(errno));
+}
+
 // ---- environment ----
+
+StringList env_all(Arena *arena)
+{
+    StringList entries = { 0 };
+    for (char **entry = environ; *entry != nullptr; entry++) {
+        strlist_push(arena, &entries, str_copy(arena, S(*entry)));
+    }
+    return entries;
+}
 
 bool env_get(Arena *arena, String name, String *value)
 {
@@ -1564,6 +1595,16 @@ Signal signals_wait(void)
     }
 }
 
+Error process_signal(int pid, Signal signal, Err *err)
+{
+    int number = signal == SIGNAL_RELOAD ? SIGHUP : SIGTERM;
+    if (kill((pid_t)pid, number) == 0) {
+        return ERR_OK;
+    }
+    Error code = errno == ESRCH ? ERR_NOT_FOUND : ERR_PLATFORM;
+    return err_set(err, code, "signal pid %d: %s", pid, strerror(errno));
+}
+
 // ---- network ----
 
 [[nodiscard]] static bool prepare_socket(int fd)
@@ -1577,6 +1618,24 @@ Signal signals_wait(void)
 #else
     return true;
 #endif
+}
+
+Error net_local_address(Arena *arena, int fd, String *address, Err *err)
+{
+    struct sockaddr_storage bound;
+    socklen_t len = sizeof bound;
+    if (getsockname(fd, (struct sockaddr *)&bound, &len) != 0) {
+        return err_set(err, ERR_NETWORK, "getsockname: %s", strerror(errno));
+    }
+    char host[NI_MAXHOST];
+    char port[NI_MAXSERV];
+    int rc = getnameinfo((struct sockaddr *)&bound, len, host, sizeof host, port, sizeof port,
+                         NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc != 0) {
+        return err_set(err, ERR_NETWORK, "getnameinfo: %s", gai_strerror(rc));
+    }
+    *address = str_format(arena, "%s:%s", host, port);
+    return ERR_OK;
 }
 
 Error net_listen(String address, int *fd, Err *err)
