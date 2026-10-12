@@ -44,14 +44,13 @@ static void json_parses_every_kind(Test *test)
 
 static void json_decodes_strings(Test *test)
 {
-    Node *root = parse(test, "[\"tab\\tquote\\\"slash\\/\", \"\\u00e6\\ud83d\\ude00\", \"\\ud800x\", \"\"]");
+    Node *root = parse(test, "[\"tab\\tquote\\\"slash\\/\", \"\\u00e6\\ud83d\\ude00\", \"\"]");
     if (root == nullptr) {
         return;
     }
     test_check_str(test, root->items[0]->text, S("tab\tquote\"slash/"), "simple escapes");
     test_check_str(test, root->items[1]->text, S("æ😀"), "\\u escapes and a surrogate pair");
-    test_check_str(test, root->items[2]->text, S("\xEF\xBF\xBDx"), "a lone surrogate becomes U+FFFD");
-    test_check(test, root->items[3]->text.len == 0, "the empty string");
+    test_check(test, root->items[2]->text.len == 0, "the empty string");
 }
 
 static void json_rejects_malformed_input(Test *test)
@@ -59,7 +58,7 @@ static void json_rejects_malformed_input(Test *test)
     const char *const invalid[] = {
         "",          "[1,]",      "{\"a\":1,}", "{'a':1}", "01",      "1.",       ".5",    "-",
         "1e",        "\"\\x\"",   "\"open",    "[1 2]",   "{\"a\" 1}", "tru",     "nul",   "\"\x01\"",
-        "\"\xff\"",  "1 2",       "1e400",     "[",       "{\"a\":}", "\"\\u12\"", "NaN",
+        "\"\xff\"",  "1 2",       "1e400",     "[",       "{\"a\":}", "\"\\u12\"", "NaN",     "\"\\ud800x\"",
     };
     for (size_t i = 0; i < countof(invalid); i++) {
         Node *root;
@@ -72,7 +71,7 @@ static void json_rejects_malformed_input(Test *test)
     Err err = { 0 };
     test_check(test, json_parse(test->arena, deep, &root, &err) == ERR_PARSE, "deep nesting is refused");
     test_check(test, json_parse(test->arena, S("{\n  \"a\": x\n}"), &root, &err) == ERR_PARSE, "a bad value");
-    test_check_str(test, S(err.msg), S("json: line 2, column 8: expected a value"), "errors carry line and column");
+    test_check_str(test, S(err.msg), S("json: line 2, column 8: unexpected character, expected a JSON value"), "errors carry line and column");
 }
 
 static void json_encodes_and_quotes(Test *test)
@@ -82,10 +81,12 @@ static void json_encodes_and_quotes(Test *test)
         return;
     }
     test_check_str(test, json_encode(test->arena, root),
-                   S("{\"a\":[1,-0.1,1e+300,\"x\\ny\"],\"b\":{\"c\":null,\"d\":false}}"), "compact output");
+                   S("{\"a\":[1,-0.1,1e300,\"x\\ny\"],\"b\":{\"c\":null,\"d\":false}}"), "compact output");
     Node *nan = node_create(test->arena, NODE_FLOAT);
     nan->number = NAN;
     test_check_str(test, json_encode(test->arena, nan), S("null"), "not a number becomes null");
+    Node *invalid = node_scalar(test->arena, NODE_STRING, S("a\xff"));
+    test_check_str(test, json_encode(test->arena, invalid), S("\"a\xEF\xBF\xBD\""), "invalid UTF-8 is replaced");
     test_check_str(test, json_quote(test->arena, S("a\"\\\x01\xff\xc3\xa6")), S("\"a\\\"\\\\\\u0001\xEF\xBF\xBD\xc3\xa6\""),
                    "control characters are escaped and invalid UTF-8 replaced");
 }
@@ -151,7 +152,7 @@ static void yaml_types_scalars_by_the_core_schema(Test *test)
     }
     test_check_str(test, json_encode(test->arena, root),
                    S("{\"nulls\":[null,null,null],\"empty\":null,\"bools\":[true,false,true],\"ints\":[42,-7,31,15,3],"
-                     "\"floats\":[1.5,-2e+03,null,null,9.223372036854776e+18],"
+                     "\"floats\":[1.5,-2000.0,null,null,9223372036854776000.0],"
                      "\"strings\":[\"12\",\"true\",\"7\",\"8\",\"0x1G\",\"yes\",\"1.2.3\"]}"),
                    "each scalar gets its kind");
     const Node *floats = node_get(root, S("floats"));
