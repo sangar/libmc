@@ -115,6 +115,30 @@ static void json_reads_numbers_of_any_length(Test *test)
     }
 }
 
+static void json_keeps_only_the_tree_and_buffer(Test *test)
+{
+    enum { COUNT = 10000, BLOCK_SIZE = 16 << 20 };
+    String text = str_concat(test->arena, S("[0"), str_concat(test->arena, str_repeat(test->arena, S(",0"), COUNT - 1), S("]")));
+
+    Arena *by_hand = arena_create(BLOCK_SIZE);
+    Node *array = node_create(by_hand, NODE_SEQUENCE);
+    for (size_t i = 0; i < COUNT; i++) {
+        node_append(by_hand, array, node_create(by_hand, NODE_INT));
+    }
+    size_t tree_bytes = arena_bytes_used(by_hand);
+    arena_destroy(by_hand);
+
+    Arena *parsed = arena_create(BLOCK_SIZE);
+    Node *root = nullptr;
+    bool ok = json_parse(parsed, text, &root, nullptr) == ERR_OK;
+    size_t parse_bytes = arena_bytes_used(parsed);
+    arena_destroy(parsed);
+
+    enum { PADDING_AND_ALIGNMENT = 64 };
+    test_check(test, ok && parse_bytes <= tree_bytes + text.len + PADDING_AND_ALIGNMENT,
+               "the caller's arena holds the tree and the parse buffer, not the yyjson document");
+}
+
 static void json_floats_ignore_the_locale(Test *test)
 {
     const char *const comma_locales[] = { "nb_NO.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8" };
@@ -230,6 +254,7 @@ const TestCase ENCODING_TESTS[] = {
     { "json_rejects_malformed_input", json_rejects_malformed_input },
     { "json_encodes_and_quotes", json_encodes_and_quotes },
     { "json_reads_numbers_of_any_length", json_reads_numbers_of_any_length },
+    { "json_keeps_only_the_tree_and_buffer", json_keeps_only_the_tree_and_buffer },
     { "json_floats_ignore_the_locale", json_floats_ignore_the_locale },
     { "yaml_types_scalars_by_the_core_schema", yaml_types_scalars_by_the_core_schema },
     { "yaml_reads_block_and_flow_collections", yaml_reads_block_and_flow_collections },
