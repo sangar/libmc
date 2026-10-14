@@ -7,7 +7,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The one vendored library, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, is pinned in `deps.lock` and builds into `libmc.a`.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The two vendored libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON and [cyaml](https://github.com/andrewmd5/cyaml) for YAML, are pinned in `deps.lock` and build into `libmc.a`.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services and the terminal.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
@@ -52,7 +52,7 @@ CI runs `./nob test` and `./nob release` with clang 18 and gcc 14 on Linux x86_6
 
 ## Usage
 
-Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching, and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources, plus `deps/cyaml/*.c` as C11 with `deps/cyaml` on the include path. cyaml is upstream's code, so it builds without libmc's warning flags. Headers are included by area and module:
+Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching, and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources, plus `deps/*/*.c` as C11 with each `deps/<name>` on the include path. The vendored libraries are upstream's code, so they build without libmc's warning flags. Headers are included by area and module:
 
 ```c
 #include <stdio.h>
@@ -98,15 +98,17 @@ The library exports plain C functions and fixed-layout structs, so any language 
 - **Out of memory aborts.** When an arena cannot get memory from the system, the process aborts. No error is returned.
 - **Arenas are single-threaded.** Give each thread its own arena.
 - **Unprefixed names.** Symbols such as `S`, `str_*` and `file_*` have no library prefix and can clash with other C libraries in the same binary.
+- **Vendored symbols.** `libmc.a` also contains yyjson's `yyjson_*` and cyaml's `cyaml_*` symbols. A project that uses yyjson directly includes `deps/yyjson/yyjson.h` from libmc instead of linking a second copy.
 - **No ABI stability promise.** Rebuild the library together with the code that uses it.
 
 ## Conventions
 
 - **Strings.** A `String` is a view and owns nothing. Functions that take an `Arena` return NUL-terminated strings allocated in it.
-- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`.
+- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`. yyjson allocates from a scratch arena that `json_parse` frees before it returns.
 - **Errors.** A function that can fail for reasons outside the caller's control, such as I/O, the network or a child process, returns `Error` and is marked `[[nodiscard]]`. Results come back through out-parameters. The last parameter is an optional `Err *` that receives a human-readable message; pass `nullptr` to ignore it. Parsers and lookups, for which "no" is an ordinary answer, return `bool` instead. Running out of memory, an allocation size that overflows, or a failed mutex or condition variable call aborts.
 - **Ownership is in the signature.** A function that allocates takes an `Arena *`. A function without one returns a view or nothing.
 - **No global state.** The exceptions are `env_set`, which changes the process environment, and the C locale that `float_parse` and `float_format` create once and share. `process_run` blocks `SIGPIPE` only in the calling thread while it feeds the child, and discards any `SIGPIPE` that leaves pending.
+- **Bundled libraries.** A vendored library is bundled when it serves a capability that libmc exposes through its own types, and never on its own terms. yyjson and cyaml both feed one `Node` tree, so JSON and YAML stay in one library and a program pays for only the parser it calls: `libmc.a` is a static archive, each parser is its own translation unit, and the linker pulls in only what is referenced. Splitting the library would buy nothing. The costs that matter are in the tree representation and the conversion step; `docs/encoding.md` records where they are and the order in which to remove them.
 - **Bridging stays in the project.** libmc is plain C with a plain C ABI and knows nothing about who calls it. It takes and returns its own types: `String`, `Arena *`, `Error`, `Err *`, fixed-layout structs and opaque handles. A project that uses it from Swift, C++, Rust, Zig, Go or Objective-C does the translation on its own side, in one bridging module: a Swift bridging header and a `String` to `Swift.String` layer, an `extern "C"` wrapper with RAII handles in C++, cgo conversions in Go. Nothing for that goes into libmc: no `#ifdef __cplusplus` or `extern "C"` blocks in its headers, the caller adds them; no Foundation, CoreFoundation, `NSString` or `CFString`; no framework headers; no callback shapes designed for one host language; no OS-specific API outside `src/platform/`. A libmc PR that exists only to make one language's bridge easier is declined. The bridge changes instead.
 
 ## Modules
@@ -139,7 +141,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/concurrency/queue.h` | Unbounded blocking FIFO of pointers, with close and timeouts |
 | | `mc/concurrency/threadpool.h` | Thread pool, chunked parallel loops, and one thread per job |
 | encoding | `mc/encoding/node.h` | Document tree of scalars, sequences and mappings shared by the parsers |
-| | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting |
+| | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting, on yyjson |
 | | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 
