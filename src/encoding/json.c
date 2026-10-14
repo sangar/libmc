@@ -10,7 +10,7 @@
 // cannot exhaust the stack here or in the code that walks the Node.
 enum { MAX_DEPTH = 512 };
 
-// yyjson allocates from the arena, which frees everything at once.
+// yyjson allocates from a scratch arena, freed once the Node tree is built.
 static void *arena_malloc(void *arena, size_t size)
 {
     return arena_push(arena, size);
@@ -132,15 +132,18 @@ Error json_parse(Arena *arena, String text, Node **root, Err *err)
     char *buffer = arena_push(arena, arena_size_add(text.len, YYJSON_PADDING_SIZE));
     memcpy(buffer, text.data, text.len);
     Converter converter = { .arena = arena, .text = text, .buffer = buffer, .err = err };
-    yyjson_alc alc = arena_allocator(arena);
+    Arena *scratch = arena_create(0);
+    yyjson_alc alc = arena_allocator(scratch);
     yyjson_read_err read_err;
     yyjson_doc *doc = yyjson_read_opts(buffer, text.len, YYJSON_READ_INSITU | YYJSON_READ_NUMBER_AS_RAW, &alc,
                                        &read_err);
+    Node *value = nullptr;
     if (doc == nullptr) {
         fail(&converter, read_err.pos, read_err.msg);
-        return ERR_PARSE;
+    } else {
+        value = convert(&converter, yyjson_doc_get_root(doc), 0);
     }
-    Node *value = convert(&converter, yyjson_doc_get_root(doc), 0);
+    arena_destroy(scratch);
     if (value == nullptr) {
         return ERR_PARSE;
     }
