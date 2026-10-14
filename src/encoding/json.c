@@ -1,355 +1,150 @@
 #include "mc/encoding/json.h"
 
-#include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include "mc/platform/platform.h"
 #include "mc/text/utf8.h"
+#include "yyjson.h"
 
-// MAX_DEPTH bounds the recursion, so hostile input cannot exhaust the stack.
+// MAX_DEPTH bounds the recursion over the parsed tree, so hostile input
+// cannot exhaust the stack here or in the code that walks the Node.
 enum { MAX_DEPTH = 512 };
+
+// yyjson allocates from a scratch arena, freed once the Node tree is built.
+static void *arena_malloc(void *arena, size_t size)
+{
+    return arena_push(arena, size);
+}
+
+static void *arena_realloc(void *arena, void *old, size_t old_size, size_t size)
+{
+    void *grown = arena_push(arena, size);
+    memcpy(grown, old, min_size(old_size, size));
+    return grown;
+}
+
+static void arena_free(void *arena, void *ptr)
+{
+    unused(arena);
+    unused(ptr);
+}
+
+static yyjson_alc arena_allocator(Arena *arena)
+{
+    return (yyjson_alc){ arena_malloc, arena_realloc, arena_free, arena };
+}
 
 typedef struct {
     Arena *arena;
     String text;
-    size_t at;
-    int depth;
+    // buffer is the arena copy of text that yyjson parses in place, so
+    // strings and numbers in the tree point into it.
+    const char *buffer;
     Err *err;
-    bool failed;
-} Parser;
+} Converter;
 
-static void fail(Parser *parser, size_t at, const char *what)
+static void fail(const Converter *converter, size_t at, const char *what)
 {
-    if (parser->failed) {
-        return;
-    }
-    parser->failed = true;
-    size_t line = 1;
-    size_t column = 1;
-    for (size_t i = 0; i < at && i < parser->text.len; i++) {
-        if (parser->text.data[i] == '\n') {
-            line++;
-            column = 1;
-        } else {
-            column++;
-        }
-    }
-    unused(err_set(parser->err, ERR_PARSE, "json: line %zu, column %zu: %s", line, column, what));
+    size_t line = 0;
+    size_t column = 0;
+    size_t character;
+    yyjson_locate_pos(converter->text.data, converter->text.len, at, &line, &column, &character);
+    unused(err_set(converter->err, ERR_PARSE, "json: line %zu, column %zu: %s", line, column, what));
 }
 
-static bool at_end(const Parser *parser)
+static Node *literal(Arena *arena, NodeKind kind, String text)
 {
-    return parser->at >= parser->text.len;
-}
-
-static char peek(const Parser *parser)
-{
-    return at_end(parser) ? '\0' : parser->text.data[parser->at];
-}
-
-static void skip_space(Parser *parser)
-{
-    for (char c = peek(parser); c == ' ' || c == '\t' || c == '\n' || c == '\r'; c = peek(parser)) {
-        parser->at++;
-    }
-}
-
-static bool consume(Parser *parser, String word)
-{
-    if (!str_starts_with(str_slice(parser->text, parser->at, parser->text.len), word)) {
-        return false;
-    }
-    parser->at += word.len;
-    return true;
-}
-
-static bool is_digit(char c)
-{
-    return c >= '0' && c <= '9';
-}
-
-static size_t skip_digits(Parser *parser)
-{
-    size_t start = parser->at;
-    while (is_digit(peek(parser))) {
-        parser->at++;
-    }
-    return parser->at - start;
-}
-
-static Node *parse_number(Parser *parser)
-{
-    size_t start = parser->at;
-    consume(parser, S("-"));
-    if (!consume(parser, S("0")) && skip_digits(parser) == 0) {
-        fail(parser, parser->at, "digits expected");
-        return nullptr;
-    }
-    bool integral = true;
-    if (consume(parser, S("."))) {
-        integral = false;
-        if (skip_digits(parser) == 0) {
-            fail(parser, parser->at, "digits expected after '.'");
-            return nullptr;
-        }
-    }
-    if (consume(parser, S("e")) || consume(parser, S("E"))) {
-        integral = false;
-        if (!consume(parser, S("+"))) {
-            consume(parser, S("-"));
-        }
-        if (skip_digits(parser) == 0) {
-            fail(parser, parser->at, "digits expected in the exponent");
-            return nullptr;
-        }
-    }
-    Node *node = node_scalar(parser->arena, NODE_INT, str_slice(parser->text, start, parser->at));
-    if (integral && str_parse_i64(node->text, &node->integer)) {
-        node->number = (double)node->integer;
-        return node;
-    }
-    node->kind = NODE_FLOAT;
-    if (!float_parse(node->text, &node->number)) {
-        fail(parser, start, "number out of range");
-        return nullptr;
-    }
-    return node;
-}
-
-static bool read_hex4(Parser *parser, uint32_t *value)
-{
-    if (parser->text.len - parser->at < 4) {
-        return false;
-    }
-    uint32_t result = 0;
-    for (size_t i = 0; i < 4; i++) {
-        char c = parser->text.data[parser->at + i];
-        uint32_t digit;
-        if (c >= '0' && c <= '9') {
-            digit = (uint32_t)(c - '0');
-        } else if (c >= 'a' && c <= 'f') {
-            digit = (uint32_t)(c - 'a' + 10);
-        } else if (c >= 'A' && c <= 'F') {
-            digit = (uint32_t)(c - 'A' + 10);
-        } else {
-            return false;
-        }
-        result = result << 4 | digit;
-    }
-    parser->at += 4;
-    *value = result;
-    return true;
-}
-
-// parse_unicode_escape reads the hex digits after "\u", joining a surrogate
-// pair; a lone surrogate becomes U+FFFD.
-static bool parse_unicode_escape(Parser *parser, uint32_t *codepoint)
-{
-    if (!read_hex4(parser, codepoint)) {
-        return false;
-    }
-    bool high_surrogate = *codepoint >= 0xD800 && *codepoint < 0xDC00;
-    size_t after = parser->at;
-    uint32_t low;
-    if (high_surrogate && consume(parser, S("\\u")) && read_hex4(parser, &low) && low >= 0xDC00 && low < 0xE000) {
-        *codepoint = 0x10000 + ((*codepoint - 0xD800) << 10) + (low - 0xDC00);
-    } else {
-        parser->at = after;
-    }
-    return true;
-}
-
-static bool parse_escape(Parser *parser, StringBuilder *builder)
-{
-    size_t start = parser->at++;
-    char escape = peek(parser);
-    parser->at++;
-    switch (escape) {
-    case '"':
-    case '\\':
-    case '/': str_builder_append_char(builder, escape); return true;
-    case 'b': str_builder_append_char(builder, '\b'); return true;
-    case 'f': str_builder_append_char(builder, '\f'); return true;
-    case 'n': str_builder_append_char(builder, '\n'); return true;
-    case 'r': str_builder_append_char(builder, '\r'); return true;
-    case 't': str_builder_append_char(builder, '\t'); return true;
-    case 'u': {
-        uint32_t codepoint;
-        if (!parse_unicode_escape(parser, &codepoint)) {
-            fail(parser, start, "invalid \\u escape");
-            return false;
-        }
-        char encoded[UTF8_MAX_BYTES];
-        str_builder_append(builder, (String){ encoded, utf8_encode(codepoint, encoded) });
-        return true;
-    }
-    default: fail(parser, start, "invalid escape"); return false;
-    }
-}
-
-// parse_string reads the string literal at the opening quote into the arena.
-static bool parse_string(Parser *parser, String *value)
-{
-    size_t open = parser->at++;
-    StringBuilder builder = str_builder_create(parser->arena, 16);
-    size_t run = parser->at;
-    for (;;) {
-        if (at_end(parser)) {
-            fail(parser, open, "unterminated string");
-            return false;
-        }
-        unsigned char c = (unsigned char)peek(parser);
-        if (c == '"' || c == '\\') {
-            str_builder_append(&builder, str_slice(parser->text, run, parser->at));
-            if (c == '"') {
-                parser->at++;
-                *value = str_builder_finish(&builder);
-                return true;
-            }
-            if (!parse_escape(parser, &builder)) {
-                return false;
-            }
-            run = parser->at;
-        } else if (c < 0x20) {
-            fail(parser, parser->at, "control character in string");
-            return false;
-        } else if (c >= 0x80) {
-            size_t start = parser->at;
-            uint32_t codepoint;
-            if (!utf8_decode(parser->text, &parser->at, &codepoint)) {
-                fail(parser, start, "invalid UTF-8 in string");
-                return false;
-            }
-        } else {
-            parser->at++;
-        }
-    }
-}
-
-static Node *parse_value(Parser *parser);
-
-static Node *parse_array(Parser *parser)
-{
-    Node *array = node_create(parser->arena, NODE_SEQUENCE);
-    parser->at++;
-    skip_space(parser);
-    if (consume(parser, S("]"))) {
-        return array;
-    }
-    for (;;) {
-        Node *item = parse_value(parser);
-        if (item == nullptr) {
-            return nullptr;
-        }
-        node_append(parser->arena, array, item);
-        skip_space(parser);
-        if (consume(parser, S("]"))) {
-            return array;
-        }
-        if (!consume(parser, S(","))) {
-            fail(parser, parser->at, "expected ',' or ']'");
-            return nullptr;
-        }
-    }
-}
-
-static Node *parse_object(Parser *parser)
-{
-    Node *object = node_create(parser->arena, NODE_MAPPING);
-    parser->at++;
-    skip_space(parser);
-    if (consume(parser, S("}"))) {
-        return object;
-    }
-    for (;;) {
-        skip_space(parser);
-        String key;
-        if (peek(parser) != '"') {
-            fail(parser, parser->at, "expected a string key");
-            return nullptr;
-        }
-        if (!parse_string(parser, &key)) {
-            return nullptr;
-        }
-        skip_space(parser);
-        if (!consume(parser, S(":"))) {
-            fail(parser, parser->at, "expected ':' after the key");
-            return nullptr;
-        }
-        Node *value = parse_value(parser);
-        if (value == nullptr) {
-            return nullptr;
-        }
-        node_put(parser->arena, object, key, value);
-        skip_space(parser);
-        if (consume(parser, S("}"))) {
-            return object;
-        }
-        if (!consume(parser, S(","))) {
-            fail(parser, parser->at, "expected ',' or '}'");
-            return nullptr;
-        }
-    }
-}
-
-static Node *literal(Parser *parser, NodeKind kind, String text)
-{
-    Node *node = node_create(parser->arena, kind);
+    Node *node = node_create(arena, kind);
     node->text = text;
     node->boolean = kind == NODE_BOOL && str_equal(text, S("true"));
     return node;
 }
 
-static Node *parse_nested(Parser *parser)
+static Node *number(const Converter *converter, yyjson_val *raw)
 {
-    char c = peek(parser);
-    if (c == '{') {
-        return parse_object(parser);
+    Node *node = literal(converter->arena, NODE_INT, (String){ yyjson_get_raw(raw), yyjson_get_len(raw) });
+    if (!str_contains_any(node->text, S(".eE")) && str_parse_i64(node->text, &node->integer)) {
+        node->number = (double)node->integer;
+        return node;
     }
-    if (c == '[') {
-        return parse_array(parser);
-    }
-    if (c == '"') {
-        String text;
-        return parse_string(parser, &text) ? literal(parser, NODE_STRING, text) : nullptr;
-    }
-    if (c == '-' || is_digit(c)) {
-        return parse_number(parser);
-    }
-    if (consume(parser, S("true"))) {
-        return literal(parser, NODE_BOOL, S("true"));
-    }
-    if (consume(parser, S("false"))) {
-        return literal(parser, NODE_BOOL, S("false"));
-    }
-    if (consume(parser, S("null"))) {
-        return literal(parser, NODE_NULL, S("null"));
-    }
-    fail(parser, parser->at, at_end(parser) ? "unexpected end of input" : "expected a value");
-    return nullptr;
-}
-
-static Node *parse_value(Parser *parser)
-{
-    skip_space(parser);
-    if (parser->depth == MAX_DEPTH) {
-        fail(parser, parser->at, "nested too deeply");
+    node->kind = NODE_FLOAT;
+    yyjson_val value;
+    yyjson_read_err err;
+    if (yyjson_read_number(node->text.data, &value, 0, nullptr, &err) == nullptr) {
+        fail(converter, (size_t)(node->text.data - converter->buffer), err.msg);
         return nullptr;
     }
-    parser->depth++;
-    Node *node = parse_nested(parser);
-    parser->depth--;
+    node->number = yyjson_get_num(&value);
     return node;
+}
+
+static Node *convert(const Converter *converter, yyjson_val *value, int depth);
+
+static Node *convert_array(const Converter *converter, yyjson_val *value, int depth)
+{
+    Node *array = node_create(converter->arena, NODE_SEQUENCE);
+    yyjson_arr_iter iter = yyjson_arr_iter_with(value);
+    for (yyjson_val *item; (item = yyjson_arr_iter_next(&iter)) != nullptr;) {
+        Node *node = convert(converter, item, depth + 1);
+        if (node == nullptr) {
+            return nullptr;
+        }
+        node_append(converter->arena, array, node);
+    }
+    return array;
+}
+
+static Node *convert_object(const Converter *converter, yyjson_val *value, int depth)
+{
+    Node *object = node_create(converter->arena, NODE_MAPPING);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(value);
+    for (yyjson_val *key; (key = yyjson_obj_iter_next(&iter)) != nullptr;) {
+        Node *node = convert(converter, yyjson_obj_iter_get_val(key), depth + 1);
+        if (node == nullptr) {
+            return nullptr;
+        }
+        node_put(converter->arena, object, (String){ yyjson_get_str(key), yyjson_get_len(key) }, node);
+    }
+    return object;
+}
+
+static Node *convert(const Converter *converter, yyjson_val *value, int depth)
+{
+    if (depth == MAX_DEPTH) {
+        unused(err_set(converter->err, ERR_PARSE, "json: nested more than %d levels deep", MAX_DEPTH));
+        return nullptr;
+    }
+    switch (yyjson_get_type(value)) {
+    case YYJSON_TYPE_NULL: return literal(converter->arena, NODE_NULL, S("null"));
+    case YYJSON_TYPE_BOOL:
+        return literal(converter->arena, NODE_BOOL, yyjson_get_bool(value) ? S("true") : S("false"));
+    case YYJSON_TYPE_RAW: return number(converter, value);
+    case YYJSON_TYPE_STR:
+        return literal(converter->arena, NODE_STRING, (String){ yyjson_get_str(value), yyjson_get_len(value) });
+    case YYJSON_TYPE_ARR: return convert_array(converter, value, depth);
+    case YYJSON_TYPE_OBJ: return convert_object(converter, value, depth);
+    default: unreachable();
+    }
 }
 
 Error json_parse(Arena *arena, String text, Node **root, Err *err)
 {
-    Parser parser = { .arena = arena, .text = text, .err = err };
-    Node *value = parse_value(&parser);
-    skip_space(&parser);
-    if (value != nullptr && !at_end(&parser)) {
-        fail(&parser, parser.at, "unexpected text after the value");
+    char *buffer = arena_push(arena, arena_size_add(text.len, YYJSON_PADDING_SIZE));
+    memcpy(buffer, text.data, text.len);
+    Converter converter = { .arena = arena, .text = text, .buffer = buffer, .err = err };
+    Arena *scratch = arena_create(0);
+    yyjson_alc alc = arena_allocator(scratch);
+    yyjson_read_err read_err;
+    yyjson_doc *doc = yyjson_read_opts(buffer, text.len, YYJSON_READ_INSITU | YYJSON_READ_NUMBER_AS_RAW, &alc,
+                                       &read_err);
+    Node *value = nullptr;
+    if (doc == nullptr) {
+        fail(&converter, read_err.pos, read_err.msg);
+    } else {
+        value = convert(&converter, yyjson_doc_get_root(doc), 0);
     }
-    if (parser.failed) {
+    arena_destroy(scratch);
+    if (value == nullptr) {
         return ERR_PARSE;
     }
     *root = value;
@@ -411,44 +206,77 @@ String json_quote(Arena *arena, String s)
     return str_builder_finish(&builder);
 }
 
-static void encode(StringBuilder *builder, const Node *node)
+static String text_for_writer(Arena *arena, String text, bool replace_invalid_utf8)
 {
-    switch (node->kind) {
-    case NODE_NULL: str_builder_append(builder, S("null")); return;
-    case NODE_BOOL: str_builder_append(builder, node->boolean ? S("true") : S("false")); return;
-    case NODE_INT: str_builder_append_format(builder, "%lld", (long long)node->integer); return;
-    case NODE_FLOAT:
-        str_builder_append(builder, isfinite(node->number) ? float_format(builder->arena, node->number) : S("null"));
-        return;
-    case NODE_STRING: json_append_quoted(builder, node->text); return;
-    case NODE_SEQUENCE:
-        str_builder_append_char(builder, '[');
-        for (size_t i = 0; i < node->count; i++) {
-            if (i > 0) {
-                str_builder_append_char(builder, ',');
-            }
-            encode(builder, node->items[i]);
-        }
-        str_builder_append_char(builder, ']');
-        return;
-    case NODE_MAPPING:
-        str_builder_append_char(builder, '{');
-        for (size_t i = 0; i < node->entry_count; i++) {
-            if (i > 0) {
-                str_builder_append_char(builder, ',');
-            }
-            json_append_quoted(builder, node->entries[i].key);
-            str_builder_append_char(builder, ':');
-            encode(builder, node->entries[i].value);
-        }
-        str_builder_append_char(builder, '}');
-        return;
+    if (!replace_invalid_utf8 || utf8_is_valid(text)) {
+        return text;
     }
+    StringBuilder builder = str_builder_create(arena, text.len);
+    size_t at = 0;
+    while (at < text.len) {
+        uint32_t codepoint;
+        utf8_decode(text, &at, &codepoint);
+        char encoded[UTF8_MAX_BYTES];
+        str_builder_append(&builder, (String){ encoded, utf8_encode(codepoint, encoded) });
+    }
+    return str_builder_finish(&builder);
 }
 
+static yyjson_mut_val *string_value(yyjson_mut_doc *doc, Arena *arena, String text, bool replace_invalid_utf8)
+{
+    String written = text_for_writer(arena, text, replace_invalid_utf8);
+    return yyjson_mut_strn(doc, written.data, written.len);
+}
+
+static yyjson_mut_val *to_writer(yyjson_mut_doc *doc, Arena *arena, const Node *node, bool replace_invalid_utf8)
+{
+    switch (node->kind) {
+    case NODE_NULL: return yyjson_mut_null(doc);
+    case NODE_BOOL: return yyjson_mut_bool(doc, node->boolean);
+    case NODE_INT: return yyjson_mut_sint(doc, node->integer);
+    case NODE_FLOAT: return yyjson_mut_real(doc, node->number);
+    case NODE_STRING: return string_value(doc, arena, node->text, replace_invalid_utf8);
+    case NODE_SEQUENCE: {
+        yyjson_mut_val *array = yyjson_mut_arr(doc);
+        for (size_t i = 0; i < node->count; i++) {
+            yyjson_mut_arr_append(array, to_writer(doc, arena, node->items[i], replace_invalid_utf8));
+        }
+        return array;
+    }
+    case NODE_MAPPING: {
+        yyjson_mut_val *object = yyjson_mut_obj(doc);
+        for (size_t i = 0; i < node->entry_count; i++) {
+            const NodeEntry *entry = &node->entries[i];
+            yyjson_mut_obj_add(object, string_value(doc, arena, entry->key, replace_invalid_utf8),
+                               to_writer(doc, arena, entry->value, replace_invalid_utf8));
+        }
+        return object;
+    }
+    }
+    unreachable();
+}
+
+static bool write_json(Arena *arena, const Node *node, bool replace_invalid_utf8, String *json)
+{
+    yyjson_alc alc = arena_allocator(arena);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(&alc);
+    yyjson_mut_doc_set_root(doc, to_writer(doc, arena, node, replace_invalid_utf8));
+    size_t len;
+    char *written = yyjson_mut_write_opts(doc, YYJSON_WRITE_INF_AND_NAN_AS_NULL, &alc, &len, nullptr);
+    if (written == nullptr) {
+        return false;
+    }
+    *json = (String){ written, len };
+    return true;
+}
+
+// json_encode writes strings as they are and only on a writer error, which
+// is invalid UTF-8, does it write again with every string checked.
 String json_encode(Arena *arena, const Node *node)
 {
-    StringBuilder builder = str_builder_create(arena, 64);
-    encode(&builder, node);
-    return str_builder_finish(&builder);
+    String json;
+    if (write_json(arena, node, false, &json) || write_json(arena, node, true, &json)) {
+        return json;
+    }
+    abort();
 }

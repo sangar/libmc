@@ -57,7 +57,7 @@ static const char *const RELEASE_FLAGS[] = { "-O2", "-DNDEBUG" };
 static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log" };
 // Vendored sources, pinned in deps.lock. They compile in their own standard
 // without the warning flags: their warnings are upstream's to fix.
-static const char *const DEPENDENCIES[] = { "deps/cyaml" };
+static const char *const DEPENDENCIES[] = { "deps/cyaml", "deps/yyjson" };
 static const char *const DEPENDENCY_FLAGS[] = { "-std=c11", "-w" };
 
 static void command_push(Command *command, const char *item)
