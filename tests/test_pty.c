@@ -110,6 +110,17 @@ static void pty_reports_what_cannot_start(Test *test)
     Pty pty;
     Error spawned = pty_spawn(a, strlist_of(a, 1, missing), S(""), (StringList) { 0 }, SIZE, &pty, &err);
     test_check(test, spawned == ERR_NOT_FOUND, "a program not on PATH");
+    const char *const missing_path[] = { "/mc/no/such/program" };
+    spawned = pty_spawn(a, strlist_of(a, 1, missing_path), S(""), (StringList) { 0 }, SIZE, &pty, &err);
+    test_check(test, spawned == ERR_NOT_FOUND, "a path to nothing");
+    const char *const relative[] = { "./sh" };
+    spawned = pty_spawn(a, strlist_of(a, 1, relative), S("/bin"), (StringList) { 0 }, SIZE, &pty, &err);
+    test_check(test, spawned == ERR_OK, "a relative path starts in cwd");
+    int exit_code;
+    int signal;
+    test_check(test, pty_signal(&pty, PTY_KILL, &err) == ERR_OK && wait_for_exit(&pty, &exit_code, &signal),
+               "it ran");
+    pty_close(&pty);
     test_check(test, pty_spawn(a, shell(a, "true"), S("/mc/no/such/dir"), (StringList) { 0 }, SIZE, &pty, &err) ==
                          ERR_NOT_FOUND,
                "a missing working directory");
