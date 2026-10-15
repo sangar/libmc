@@ -15,16 +15,11 @@
 #include <unistd.h>
 
 #include "mc/platform/platform.h"
+#include "posix_shared.h"
 
 extern char **environ;
 
-enum { SLAVE_NAME_LIMIT = 256, WRITE_TIMEOUT_MS = 1000 };
-
-[[nodiscard]] static Error fail_errno(Err *err, const char *what)
-{
-    int saved = errno;
-    return err_set(err, ERR_PLATFORM, "%s: %s", what, strerror(saved));
-}
+enum { SLAVE_NAME_LIMIT = 256 };
 
 static struct winsize window_size(PtySize size)
 {
@@ -43,8 +38,19 @@ static struct winsize window_size(PtySize size)
 #endif
 }
 
-// build_environment is this process's environment with each NAME=value of
-// overrides replacing the entry of that name or joining the end.
+static size_t find_variable(char **items, size_t count, String name)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (strncmp(items[i], name.data, name.len) == 0 && items[i][name.len] == '=') {
+            return i;
+        }
+    }
+    return count;
+}
+
+// build_environment is this process's environment with overrides applied in
+// turn: NAME=value replaces the entry of that name or joins the end, and a
+// bare NAME removes it.
 static char **build_environment(Arena *scratch, StringList overrides)
 {
     size_t inherited = 0;
@@ -60,22 +66,35 @@ static char **build_environment(Arena *scratch, StringList overrides)
     for (size_t i = 0; i < overrides.count; i++) {
         String name;
         String value;
-        if (!str_cut(overrides.items[i], '=', &name, &value)) {
+        bool assigns = str_cut(overrides.items[i], '=', &name, &value);
+        size_t at = find_variable(items, count, name);
+        if (!assigns) {
+            if (at < count) {
+                memmove(&items[at], &items[at + 1], (count - at - 1) * sizeof *items);
+                count--;
+            }
             continue;
         }
-        char *entry = (char *)str_cstr(scratch, overrides.items[i]);
-        size_t at = count;
-        for (size_t j = 0; j < count; j++) {
-            if (strncmp(items[j], name.data, name.len) == 0 && items[j][name.len] == '=') {
-                at = j;
-                break;
-            }
-        }
-        items[at] = entry;
+        items[at] = (char *)str_cstr(scratch, overrides.items[i]);
         count = at == count ? count + 1 : count;
     }
     items[count] = nullptr;
     return items;
+}
+
+// child_path is the PATH the child will have: the last override of it, else this process's.
+static String child_path(StringList overrides)
+{
+    String path = S(getenv("PATH"));
+    for (size_t i = 0; i < overrides.count; i++) {
+        String name;
+        String value;
+        bool assigns = str_cut(overrides.items[i], '=', &name, &value);
+        if (str_equal(name, S("PATH"))) {
+            path = assigns ? value : S("");
+        }
+    }
+    return path;
 }
 
 static char **build_argv(Arena *scratch, StringList argv, const char *program)
@@ -160,7 +179,7 @@ Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, Pty
         return err_set(err, ERR_INVALID_ARGUMENT, "pty_spawn needs a program and a positive size");
     }
     String program = argv.items[0];
-    if (!str_contains(program, S("/")) && !process_look_path(scratch, program, &program)) {
+    if (!str_contains(program, S("/")) && !posix_look_path(scratch, program, child_path(env), &program)) {
         return err_set(err, ERR_NOT_FOUND, "%.*s: not found on PATH", (int)program.len, program.data);
     }
     const char *program_path = str_cstr(scratch, program);
@@ -168,37 +187,35 @@ Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, Pty
     char **child_argv = build_argv(scratch, argv, program_path);
     char **child_env = build_environment(scratch, env);
 
-    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    // Every descriptor is close-on-exec from the start, so a child that another
+    // thread spawns meanwhile does not keep this terminal open.
+    int master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (master < 0) {
-        return fail_errno(err, "open pseudo-terminal");
+        return posix_fail_errno(err, "open pseudo-terminal");
     }
     // The parent opens the terminal side too, so the size is set before the
     // child can ask for it, and the child gets it already open.
     char slave_path[SLAVE_NAME_LIMIT];
     int slave = -1;
     if (grantpt(master) != 0 || unlockpt(master) != 0 || !slave_name(master, slave_path) ||
-        (slave = open(slave_path, O_RDWR | O_NOCTTY)) < 0) {
-        Error failed = fail_errno(err, "prepare pseudo-terminal");
+        (slave = open(slave_path, O_RDWR | O_NOCTTY | O_CLOEXEC)) < 0) {
+        Error failed = posix_fail_errno(err, "prepare pseudo-terminal");
         close(master);
         return failed;
     }
     struct winsize dimensions = window_size(size);
     ioctl(slave, TIOCSWINSZ, &dimensions);
-    fcntl(master, F_SETFD, FD_CLOEXEC);
-    fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
     int status[2];
-    if (pipe(status) != 0) {
-        Error failed = fail_errno(err, "pipe");
+    if (!posix_make_nonblocking(master) || !posix_open_pipe(status)) {
+        Error failed = posix_fail_errno(err, "prepare pseudo-terminal");
         close(slave);
         close(master);
         return failed;
     }
-    fcntl(status[0], F_SETFD, FD_CLOEXEC);
-    fcntl(status[1], F_SETFD, FD_CLOEXEC);
 
     pid_t child = fork();
     if (child < 0) {
-        Error failed = fail_errno(err, "fork");
+        Error failed = posix_fail_errno(err, "fork");
         close(status[0]);
         close(status[1]);
         close(slave);
@@ -226,12 +243,12 @@ Error pty_resize(const Pty *pty, PtySize size, Err *err)
 {
     struct winsize dimensions = window_size(size);
     if (ioctl(pty->fd, TIOCSWINSZ, &dimensions) != 0) {
-        return fail_errno(err, "resize pseudo-terminal");
+        return posix_fail_errno(err, "resize pseudo-terminal");
     }
     return ERR_OK;
 }
 
-Error pty_write(const Pty *pty, String data, Err *err)
+Error pty_write(const Pty *pty, String data, int timeout_ms, Err *err)
 {
     size_t done = 0;
     while (done < data.len) {
@@ -245,12 +262,12 @@ Error pty_write(const Pty *pty, String data, Err *err)
         }
         if (n < 0 && errno == EAGAIN) {
             struct pollfd waiting = { .fd = pty->fd, .events = POLLOUT };
-            if (poll(&waiting, 1, WRITE_TIMEOUT_MS) == 0) {
+            if (poll(&waiting, 1, timeout_ms) == 0) {
                 return err_set(err, ERR_TIMEOUT, "the process is not reading its input");
             }
             continue;
         }
-        return fail_errno(err, "write to pseudo-terminal");
+        return posix_fail_errno(err, "write to pseudo-terminal");
     }
     return ERR_OK;
 }
@@ -289,7 +306,7 @@ Error pty_signal(const Pty *pty, PtySignal signal, Err *err)
     }
     if (kill(-pty->pid, numbers[signal]) != 0) {
         return errno == ESRCH ? err_set(err, ERR_NOT_FOUND, "no process left in the group")
-                              : fail_errno(err, "signal process group");
+                              : posix_fail_errno(err, "signal process group");
     }
     return ERR_OK;
 }

@@ -28,10 +28,10 @@ typedef enum PtySignal {
 } PtySignal;
 
 // pty_spawn runs argv on a new terminal of the given size. argv.items[0] is
-// looked up on PATH unless it holds a slash; a relative path starts in cwd.
-// cwd is the working directory, this process's when empty.
-// env holds NAME=value entries that replace or add to this process's
-// environment. Signals blocked in the calling thread are unblocked in the
+// looked up on the child's PATH unless it holds a slash; a relative path
+// starts in cwd. cwd is the working directory, this process's when empty.
+// env changes this process's environment for the child: NAME=value replaces
+// or adds a variable, a bare NAME removes one. Signals blocked in the calling thread are unblocked in the
 // child. A program that is not found or not executable, or a missing cwd, is
 // ERR_NOT_FOUND.
 // The strings for the system calls are allocated in scratch.
@@ -41,8 +41,9 @@ typedef enum PtySignal {
 [[nodiscard]] Error pty_resize(const Pty *pty, PtySize size, Err *err);
 
 // pty_write types data to the child and returns once all of it is accepted,
-// ERR_TIMEOUT when the child has stopped reading for a second.
-[[nodiscard]] Error pty_write(const Pty *pty, String data, Err *err);
+// or ERR_TIMEOUT once the child has taken nothing for timeout_ms, as when it
+// has stopped reading and its terminal's input queue is full.
+[[nodiscard]] Error pty_write(const Pty *pty, String data, int timeout_ms, Err *err);
 
 typedef enum PtyEvent {
     PTY_DATA,   // *got bytes were read

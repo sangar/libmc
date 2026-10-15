@@ -7,7 +7,6 @@
 #include <net/if.h>
 #include <net/route.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 
@@ -22,12 +21,8 @@ enum { IFT_LOOP = 0x18 };
 #include "mc/core/arena.h"
 #include "mc/platform/platform.h"
 #include "mc/platform/sysinfo.h"
+#include "posix_shared.h"
 
-[[nodiscard]] static Error fail_errno(Err *err, const char *what)
-{
-    int saved = errno;
-    return err_set(err, ERR_PLATFORM, "%s: %s", what, strerror(saved));
-}
 
 static void read_cores(SystemSample *sample)
 {
@@ -78,32 +73,46 @@ static void read_memory(SystemSample *sample)
     }
 }
 
-static void read_network(Arena *scratch, SystemSample *sample)
+enum { INTERFACE_LIST_TRIES = 4 };
+
+// read_network adds up the counters of every interface but loopback, up or
+// down, so that an interface going down for a while does not make the total
+// drop and then jump back. It fails when it cannot list the interfaces.
+[[nodiscard]] static bool read_network(Arena *scratch, SystemSample *sample)
 {
     int mib[6] = { CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0 };
-    size_t length = 0;
-    if (sysctl(mib, 6, nullptr, &length, nullptr, 0) != 0) {
-        return;
-    }
     ArenaMark mark = arena_mark(scratch);
-    char *list = arena_push(scratch, length);
-    if (sysctl(mib, 6, list, &length, nullptr, 0) == 0) {
-        for (size_t at = 0; at + sizeof(struct if_msghdr) <= length;) {
-            const struct if_msghdr *header = (const struct if_msghdr *)(list + at);
-            if (header->ifm_msglen == 0) {
-                break;
-            }
-            if (header->ifm_type == RTM_IFINFO2) {
-                const struct if_msghdr2 *info = (const struct if_msghdr2 *)header;
-                if ((info->ifm_flags & IFF_UP) != 0 && info->ifm_data.ifi_type != IFT_LOOP) {
-                    sample->network_received_bytes += info->ifm_data.ifi_ibytes;
-                    sample->network_sent_bytes += info->ifm_data.ifi_obytes;
-                }
-            }
-            at += header->ifm_msglen;
+    char *list = nullptr;
+    size_t length = 0;
+    // The list can grow between asking for its length and reading it.
+    bool listed = false;
+    for (int tries = 0; !listed && tries < INTERFACE_LIST_TRIES; tries++) {
+        if (sysctl(mib, 6, nullptr, &length, nullptr, 0) != 0) {
+            break;
+        }
+        length += length / 8;
+        list = arena_push(scratch, length);
+        listed = sysctl(mib, 6, list, &length, nullptr, 0) == 0;
+        if (!listed && errno != ENOMEM) {
+            break;
         }
     }
+    for (size_t at = 0; listed && at + sizeof(struct if_msghdr) <= length;) {
+        const struct if_msghdr *header = (const struct if_msghdr *)(list + at);
+        if (header->ifm_msglen == 0) {
+            break;
+        }
+        if (header->ifm_type == RTM_IFINFO2) {
+            const struct if_msghdr2 *info = (const struct if_msghdr2 *)header;
+            if (info->ifm_data.ifi_type != IFT_LOOP) {
+                sample->network_received_bytes += info->ifm_data.ifi_ibytes;
+                sample->network_sent_bytes += info->ifm_data.ifi_obytes;
+            }
+        }
+        at += header->ifm_msglen;
+    }
     arena_release(mark);
+    return listed;
 }
 
 Error system_sample(Arena *scratch, SystemSample *sample, Err *err)
@@ -111,9 +120,11 @@ Error system_sample(Arena *scratch, SystemSample *sample, Err *err)
     *sample = (SystemSample) { 0 };
     read_cores(sample);
     read_memory(sample);
-    read_network(scratch, sample);
+    if (!read_network(scratch, sample)) {
+        return posix_fail_errno(err, "list network interfaces");
+    }
     if (getloadavg(sample->load_average, 3) < 0) {
-        return fail_errno(err, "read load average");
+        return posix_fail_errno(err, "read load average");
     }
     struct timeval boot;
     size_t size = sizeof boot;
