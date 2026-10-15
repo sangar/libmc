@@ -47,3 +47,6 @@ extern const TestCase SERVICE_TESTS[];
 extern const TestCase PTY_TESTS[];
 extern const TestCase SYSINFO_TESTS[];
 extern const AbortCase ABORT_CASES[];
+
+// Abort cases that live with the tests that run them.
+void terminal_round_trip(void);
