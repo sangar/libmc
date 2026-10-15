@@ -87,7 +87,7 @@ int main(int argc, char **argv)
         thread_detach(&watchdog);
     }
     const TestCase *tables[] = { ARENA_TESTS, STR_TESTS, STRMAP_TESTS, IDTABLE_TESTS, TEXT_TESTS, PLATFORM_TESTS, CONCURRENCY_TESTS,
-                                   ENCODING_TESTS, LOG_TESTS, WATCH_TESTS, SERVICE_TESTS };
+                                   ENCODING_TESTS, LOG_TESTS, WATCH_TESTS, SERVICE_TESTS, PTY_TESTS, SYSINFO_TESTS };
     unsigned failed = 0;
     unsigned checks = 0;
     for (size_t i = 0; i < countof(tables); i++) {
