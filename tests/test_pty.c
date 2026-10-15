@@ -2,8 +2,10 @@
 
 #include "mc/platform/platform.h"
 #include "mc/platform/pty.h"
+#include "mc/platform/terminal.h"
 
 #include <signal.h>
+#include <stdlib.h>
 
 enum { OUTPUT_DEADLINE_MS = 5000 };
 
@@ -113,9 +115,44 @@ static void pty_reports_what_cannot_start(Test *test)
                "a missing working directory");
 }
 
+// terminal_round_trip opens and closes the controlling terminal, then
+// aborts to show it got that far.
+void terminal_round_trip(void)
+{
+    Terminal *terminal;
+    if (terminal_open(&terminal, nullptr) != ERR_OK) {
+        return;
+    }
+    terminal_close(terminal);
+    abort();
+}
+
+static void terminal_closes_on_a_pseudo_terminal(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    const char *const args[] = { "", "--abort-case", "terminal_round_trip" };
+    StringList argv = strlist_of(a, countof(args), args);
+    test_check(test, process_executable_path(a, &argv.items[0], &err) == ERR_OK, "find the test binary");
+    Pty pty;
+    test_check(test, pty_spawn(a, argv, S(""), (StringList) { 0 }, SIZE, &pty, &err) == ERR_OK, "spawn it");
+    read_until_hangup(a, &pty);
+    int exit_code;
+    int signal;
+    bool ended = wait_for_exit(&pty, &exit_code, &signal);
+    if (!ended) {
+        Error killed = pty_signal(&pty, PTY_KILL, nullptr);
+        unused(killed);
+        wait_for_exit(&pty, &exit_code, &signal);
+    }
+    test_check(test, ended && signal == SIGABRT, "terminal_close returns");
+    pty_close(&pty);
+}
+
 const TestCase PTY_TESTS[] = {
     { "pty_runs_a_program_on_a_terminal", pty_runs_a_program_on_a_terminal },
     { "pty_passes_input_and_signals_the_group", pty_passes_input_and_signals_the_group },
     { "pty_reports_what_cannot_start", pty_reports_what_cannot_start },
+    { "terminal_closes_on_a_pseudo_terminal", terminal_closes_on_a_pseudo_terminal },
     { nullptr, nullptr },
 };
