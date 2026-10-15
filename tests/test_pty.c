@@ -1,6 +1,7 @@
 #include "test.h"
 
 #include "mc/platform/platform.h"
+#include "mc/text/path.h"
 #include "mc/platform/pty.h"
 #include "mc/platform/terminal.h"
 
@@ -80,7 +81,7 @@ static void pty_passes_input_and_signals_the_group(Test *test)
     test_check(test, pty_spawn(a, shell(a, "read line; echo \"got $line\"; sleep 30 & wait"), S(""), (StringList) { 0 },
                                SIZE, &pty, &err) == ERR_OK,
                "spawn sh");
-    test_check(test, pty_write(&pty, S("ping\r"), &err) == ERR_OK, "type a line");
+    test_check(test, pty_write(&pty, S("ping\r"), 1000, &err) == ERR_OK, "type a line");
     String echoed = { 0 };
     int64_t deadline = clock_monotonic_ns() + (int64_t)OUTPUT_DEADLINE_MS * NS_PER_MILLISECOND;
     StringBuilder output = str_builder_create(a, 256);
@@ -100,6 +101,32 @@ static void pty_passes_input_and_signals_the_group(Test *test)
     test_check(test, wait_for_exit(&pty, &exit_code, &signal) && signal == SIGTERM, "the signal ends the child");
     test_check(test, read_until_hangup(a, &pty).len < 4096, "the terminal hangs up once the group is gone");
     pty_close(&pty);
+}
+
+static void pty_env_removes_and_finds_programs_on_the_childs_path(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-pty-path-"), &dir, &err) == ERR_OK, "create a temp dir");
+    String tool = path_join(a, dir, S("mc-pty-tool"));
+    test_check(test, file_write_all(tool, S("#!/bin/sh\necho \"tool ${HOME-unset}\"\n"), 0755, &err) == ERR_OK,
+               "write a program");
+    const char *const env[] = { "HOME", "PATH" };
+    StringList overrides = strlist_of(a, countof(env), env);
+    overrides.items[1] = str_format(a, "PATH=%.*s:/bin:/usr/bin", (int)dir.len, dir.data);
+    const char *const argv[] = { "mc-pty-tool" };
+    Pty pty;
+    Error spawned = pty_spawn(a, strlist_of(a, 1, argv), S(""), overrides, SIZE, &pty, &err);
+    test_check(test, spawned == ERR_OK, "a program on the child's PATH");
+    if (spawned == ERR_OK) {
+        test_check(test, str_contains(read_until_hangup(a, &pty), S("tool unset")), "a bare NAME removes it");
+        int exit_code;
+        int signal;
+        wait_for_exit(&pty, &exit_code, &signal);
+        pty_close(&pty);
+    }
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "remove the temp dir");
 }
 
 static void pty_reports_what_cannot_start(Test *test)
@@ -163,6 +190,7 @@ static void terminal_closes_on_a_pseudo_terminal(Test *test)
 const TestCase PTY_TESTS[] = {
     { "pty_runs_a_program_on_a_terminal", pty_runs_a_program_on_a_terminal },
     { "pty_passes_input_and_signals_the_group", pty_passes_input_and_signals_the_group },
+    { "pty_env_removes_and_finds_programs_on_the_childs_path", pty_env_removes_and_finds_programs_on_the_childs_path },
     { "pty_reports_what_cannot_start", pty_reports_what_cannot_start },
     { "terminal_closes_on_a_pseudo_terminal", terminal_closes_on_a_pseudo_terminal },
     { nullptr, nullptr },

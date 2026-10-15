@@ -135,7 +135,7 @@ Error terminal_open(Terminal **terminal, Err *err)
     sigset_t window_change;
     window_change_only(&window_change);
     pthread_sigmask(SIG_BLOCK, &window_change, &opened->previous_mask);
-    struct sigaction keep = { .sa_handler = keep_window_changes };
+    struct sigaction keep = { .sa_handler = keep_window_changes, .sa_flags = SA_RESTART };
     sigemptyset(&keep.sa_mask);
     sigaction(SIGWINCH, &keep, &opened->previous_action);
     int rc = pthread_create(&opened->resize_thread, nullptr, take_resizes, opened);
