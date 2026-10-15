@@ -99,9 +99,19 @@ static void reset_signals(void)
     }
 }
 
-// run_child never returns: it becomes the program, or says why it could not.
-[[noreturn]] static void run_child(int terminal, const char *cwd, const char *program, char **argv, char **envp,
-                                   const char *failure, size_t failure_len)
+// ChildFailure is what a child that could not become the program reports
+// through the status pipe: the step that failed and its errno.
+typedef struct {
+    int step;
+    int code;
+} ChildFailure;
+
+enum { STEP_CHDIR = 1, STEP_EXEC = 2 };
+
+// run_child never returns: it becomes the program, which closes the status
+// pipe, or writes why it could not to the pipe.
+[[noreturn]] static void run_child(int terminal, int status, const char *cwd, const char *program, char **argv,
+                                   char **envp)
 {
     setsid();
     ioctl(terminal, TIOCSCTTY, 0);
@@ -112,12 +122,36 @@ static void reset_signals(void)
         close(terminal);
     }
     reset_signals();
+    ChildFailure failure = { .step = STEP_CHDIR };
     if (cwd[0] == '\0' || chdir(cwd) == 0) {
+        failure.step = STEP_EXEC;
         execve(program, argv, envp);
     }
-    ssize_t written = write(STDERR_FILENO, failure, failure_len);
+    failure.code = errno;
+    ssize_t written = write(status, &failure, sizeof failure);
     unused(written);
     _exit(127);
+}
+
+// await_exec returns once the child has become the program, or has said why
+// it could not; that child it reaps. Either way the child has left this
+// process's group by then, so its own group can be signalled.
+[[nodiscard]] static Error await_exec(int status, pid_t child, String program, String cwd, Err *err)
+{
+    ChildFailure failure;
+    ssize_t got;
+    do {
+        got = read(status, &failure, sizeof failure);
+    } while (got < 0 && errno == EINTR);
+    if (got != (ssize_t)sizeof failure) {
+        return ERR_OK;
+    }
+    while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {
+    }
+    bool missing = failure.code == ENOENT || failure.code == ENOTDIR || failure.code == EACCES;
+    Error code = missing ? ERR_NOT_FOUND : ERR_PLATFORM;
+    String what = failure.step == STEP_CHDIR ? cwd : program;
+    return err_set(err, code, "%.*s: %s", (int)what.len, what.data, strerror(failure.code));
 }
 
 Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, PtySize size, Pty *pty, Err *err)
@@ -127,24 +161,12 @@ Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, Pty
     }
     String program = argv.items[0];
     if (!str_contains(program, S("/")) && !process_look_path(scratch, program, &program)) {
-        return err_set(err, ERR_NOT_FOUND, "%.*s: not found on PATH", (int)argv.items[0].len, argv.items[0].data);
+        return err_set(err, ERR_NOT_FOUND, "%.*s: not found on PATH", (int)program.len, program.data);
     }
-    if (cwd.len > 0) {
-        FileInfo info;
-        Error found = file_info_follow(cwd, &info, err);
-        if (found != ERR_OK) {
-            return found;
-        }
-        if (!info.is_dir) {
-            return err_set(err, ERR_NOT_FOUND, "%.*s: not a directory", (int)cwd.len, cwd.data);
-        }
-    }
-
     const char *program_path = str_cstr(scratch, program);
     const char *cwd_path = str_cstr(scratch, cwd);
     char **child_argv = build_argv(scratch, argv, program_path);
     char **child_env = build_environment(scratch, env);
-    String failure = str_format(scratch, "cannot run %s\r\n", program_path);
 
     int master = posix_openpt(O_RDWR | O_NOCTTY);
     if (master < 0) {
@@ -164,19 +186,38 @@ Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, Pty
     ioctl(slave, TIOCSWINSZ, &dimensions);
     fcntl(master, F_SETFD, FD_CLOEXEC);
     fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
+    int status[2];
+    if (pipe(status) != 0) {
+        Error failed = fail_errno(err, "pipe");
+        close(slave);
+        close(master);
+        return failed;
+    }
+    fcntl(status[0], F_SETFD, FD_CLOEXEC);
+    fcntl(status[1], F_SETFD, FD_CLOEXEC);
 
     pid_t child = fork();
     if (child < 0) {
         Error failed = fail_errno(err, "fork");
+        close(status[0]);
+        close(status[1]);
         close(slave);
         close(master);
         return failed;
     }
     if (child == 0) {
         close(master);
-        run_child(slave, cwd_path, program_path, child_argv, child_env, failure.data, failure.len);
+        close(status[0]);
+        run_child(slave, status[1], cwd_path, program_path, child_argv, child_env);
     }
     close(slave);
+    close(status[1]);
+    Error started = await_exec(status[0], child, program, cwd, err);
+    close(status[0]);
+    if (started != ERR_OK) {
+        close(master);
+        return started;
+    }
     *pty = (Pty) { .fd = master, .pid = child };
     return ERR_OK;
 }
@@ -243,6 +284,9 @@ Error pty_signal(const Pty *pty, PtySignal signal, Err *err)
         [PTY_TERMINATE] = SIGTERM,
         [PTY_KILL] = SIGKILL,
     };
+    if (pty->pid <= 0) {
+        return err_set(err, ERR_NOT_FOUND, "the process has been reaped");
+    }
     if (kill(-pty->pid, numbers[signal]) != 0) {
         return errno == ESRCH ? err_set(err, ERR_NOT_FOUND, "no process left in the group")
                               : fail_errno(err, "signal process group");

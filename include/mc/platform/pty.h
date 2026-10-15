@@ -8,8 +8,9 @@
 // reaches the child and everything it started. What the child writes to its
 // terminal is read from fd, and what is written to fd is typed to the child.
 //
-// One thread can read and reap while another writes, resizes and signals; the
-// fields do not change between pty_spawn and pty_close.
+// One thread can read and reap while others write and resize. pty_reap clears
+// pid, so a thread that signals the child while another may reap it works on
+// a copy of the Pty and stops signalling once the reaper says it is gone.
 typedef struct Pty {
     int fd;
     int pid;
@@ -26,11 +27,13 @@ typedef enum PtySignal {
     PTY_KILL,      // SIGKILL
 } PtySignal;
 
-// pty_spawn runs argv, argv.items[0] looked up on PATH, on a new terminal of
-// the given size. cwd is the working directory, this process's when empty.
+// pty_spawn runs argv on a new terminal of the given size. argv.items[0] is
+// looked up on PATH unless it holds a slash; a relative path starts in cwd.
+// cwd is the working directory, this process's when empty.
 // env holds NAME=value entries that replace or add to this process's
 // environment. Signals blocked in the calling thread are unblocked in the
-// child. A program that is not found, or a missing cwd, is ERR_NOT_FOUND.
+// child. A program that is not found or not executable, or a missing cwd, is
+// ERR_NOT_FOUND.
 // The strings for the system calls are allocated in scratch.
 [[nodiscard]] Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, PtySize size, Pty *pty,
                               Err *err);
