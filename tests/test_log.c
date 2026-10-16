@@ -3,6 +3,9 @@
 #include <stdio.h>
 
 #include "mc/log/log.h"
+#include "mc/log/logfile.h"
+#include "mc/platform/platform.h"
+#include "mc/text/path.h"
 
 // logged writes through a logger into a temporary file and returns what it holds.
 static String logged(Test *test, LogLevel level, LogFormat format, void (*write)(Logger *logger))
@@ -91,7 +94,39 @@ static void logger_parses_settings(Test *test)
     test_check(test, !log_parse_format(S("xml"), &format), "an unknown format");
 }
 
+static void logfile_rotates_at_its_limit(Test *test)
+{
+    Arena *a = test->arena;
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, nullptr) == ERR_OK, "a temp dir");
+    String path = path_join(a, dir, S("logs/app.log"));
+    // Each line takes more than half the limit, whatever the zone makes its time.
+    String padding = str_repeat(a, S("."), 60);
+    LogFile *file = logfile_create(path, 120);
+    Err err = { 0 };
+    test_check(test, logfile_write(file, a, str_concat(a, S("first"), padding), clock_wall_ns(), &err) == ERR_OK,
+               err.msg);
+    test_check(test, logfile_write(file, a, str_concat(a, S("second"), padding), clock_wall_ns(), &err) == ERR_OK,
+               "a line past the limit");
+    logfile_destroy(file);
+    String old = S("");
+    String now = S("");
+    test_check(test, file_read_all(a, str_concat(a, path, S(".1")), &old, nullptr) == ERR_OK, "the old file moved aside");
+    test_check(test, file_read_all(a, path, &now, nullptr) == ERR_OK, "a new one started, directory and all");
+    test_check(test, str_contains(old, S(" first.")) && !str_contains(old, S("second")), "the oldest line moved");
+    test_check(test, str_contains(now, S(" second.")) && !str_contains(now, S("first")), "the newest stayed");
+    test_check(test, str_starts_with(now, S("20")) && str_contains(now, S("T")), "each line after its time");
+    file = logfile_create(path, 1000);
+    test_check(test, logfile_write(file, a, S("third"), clock_wall_ns(), &err) == ERR_OK, "open it again");
+    logfile_destroy(file);
+    test_check(test, file_read_all(a, path, &now, nullptr) == ERR_OK && str_contains(now, S(" second.")) &&
+                         str_ends_with(now, S(" third\n")),
+               "it appends to what is there");
+    test_check(test, dir_remove_all(dir, nullptr) == ERR_OK, "clean up");
+}
+
 const TestCase LOG_TESTS[] = {
+    { "logfile_rotates_at_its_limit", logfile_rotates_at_its_limit },
     { "logger_writes_text", logger_writes_text },
     { "logger_quotes_text_keys", logger_quotes_text_keys },
     { "logger_writes_json", logger_writes_json },
