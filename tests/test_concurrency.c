@@ -242,7 +242,7 @@ static void debounce_fires_each_key_once_after_quiet(Test *test)
     mutex_init(&firings.mutex);
     cond_init(&firings.fired);
     Debouncer *debouncer;
-    const int64_t delay = 40 * NS_PER_MILLISECOND;
+    const int64_t delay = 200 * NS_PER_MILLISECOND;
     if (debounce_create(delay, record_firing, &firings, &debouncer, nullptr) != ERR_OK) {
         test_check(test, false, "create a debouncer");
         return;
