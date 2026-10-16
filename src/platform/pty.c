@@ -299,6 +299,8 @@ Error pty_signal(const Pty *pty, PtySignal signal, Err *err)
     const int numbers[] = {
         [PTY_INTERRUPT] = SIGINT,
         [PTY_TERMINATE] = SIGTERM,
+        [PTY_RELOAD] = SIGHUP,
+        [PTY_QUIT] = SIGQUIT,
         [PTY_KILL] = SIGKILL,
     };
     if (pty->pid <= 0) {
