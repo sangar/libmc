@@ -25,6 +25,7 @@ struct Terminal {
     int fd;
     struct termios saved;
     sigset_t previous_mask;
+    struct sigaction previous_action;
     int wake_read;
     int wake_write;
     atomic_bool woken;
@@ -68,6 +69,16 @@ static void *take_resizes(void *argument)
         atomic_store(&terminal->resized, true);
         notify(terminal);
     }
+}
+
+// macOS discards a signal whose action is the default one of ignoring it, as
+// SIGWINCH's is, even while a thread waits for it in sigwait, so the
+// pthread_kill in terminal_close would never wake the resize thread. A
+// handler that does nothing keeps the signal; it never runs, since every
+// thread blocks SIGWINCH.
+static void keep_window_changes(int number)
+{
+    unused(number);
 }
 
 static void enter_raw_mode(int fd, const struct termios *saved)
@@ -124,9 +135,13 @@ Error terminal_open(Terminal **terminal, Err *err)
     sigset_t window_change;
     window_change_only(&window_change);
     pthread_sigmask(SIG_BLOCK, &window_change, &opened->previous_mask);
+    struct sigaction keep = { .sa_handler = keep_window_changes, .sa_flags = SA_RESTART };
+    sigemptyset(&keep.sa_mask);
+    sigaction(SIGWINCH, &keep, &opened->previous_action);
     int rc = pthread_create(&opened->resize_thread, nullptr, take_resizes, opened);
     if (rc != 0) {
         Error e = err_set(err, ERR_PLATFORM, "start a thread: %s", strerror(rc));
+        sigaction(SIGWINCH, &opened->previous_action, nullptr);
         pthread_sigmask(SIG_SETMASK, &opened->previous_mask, nullptr);
         close(opened->wake_read);
         close(opened->wake_write);
@@ -147,6 +162,7 @@ void terminal_close(Terminal *terminal)
     atomic_store(&terminal->closing, true);
     pthread_kill(terminal->resize_thread, SIGWINCH);
     pthread_join(terminal->resize_thread, nullptr);
+    sigaction(SIGWINCH, &terminal->previous_action, nullptr);
     pthread_sigmask(SIG_SETMASK, &terminal->previous_mask, nullptr);
     tcsetattr(terminal->fd, TCSAFLUSH, &terminal->saved);
     close(terminal->fd);
