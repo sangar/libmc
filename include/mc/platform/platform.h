@@ -95,6 +95,12 @@ void file_close(int fd);
 // an exclusive lock on it, held until file_close(*fd). The lock is advisory:
 // it keeps out only others that take it, in this process or another.
 [[nodiscard]] Error file_lock(String path, int *fd, Err *err);
+// file_try_lock is file_lock without waiting: when another holds the lock,
+// it is ERR_OK with *locked false and *fd -1.
+[[nodiscard]] Error file_try_lock(String path, int *fd, bool *locked, Err *err);
+// file_find_upward looks in directory and then each directory above it for
+// the first of names that exists, and stores its path.
+bool file_find_upward(Arena *arena, String directory, StringList names, String *path);
 // file_read reads up to capacity bytes; *got is 0 at end of file.
 [[nodiscard]] Error file_read(int fd, void *buffer, size_t capacity, size_t *got, Err *err);
 [[nodiscard]] Error file_pread(int fd, void *buffer, size_t capacity, int64_t offset, size_t *got, Err *err);
@@ -159,6 +165,12 @@ typedef struct DirEntryList {
 [[nodiscard]] Error dir_read(Arena *arena, String path, DirEntryList *entries, Err *err);
 // dir_create_temp makes a fresh directory named prefix plus a random suffix in the temporary directory.
 [[nodiscard]] Error dir_create_temp(Arena *arena, String prefix, String *path, Err *err);
+// dir_runtime is a directory only this user can use, for sockets and locks:
+// $XDG_RUNTIME_DIR/name where that is set, else name-<uid> in the temporary
+// directory. It is made with mode 0700 when missing. One that is a symlink,
+// belongs to another user or lets others in is ERR_IO, since in a shared
+// temporary directory another user could have made it first.
+[[nodiscard]] Error dir_runtime(Arena *arena, String name, String *path, Err *err);
 
 // ---- paths the file system decides ----
 
@@ -226,6 +238,16 @@ typedef enum Signal { SIGNAL_STOP, SIGNAL_RELOAD } Signal;
 void signals_block(void);
 // signals_wait blocks until a stop or reload signal arrives.
 Signal signals_wait(void);
+
+// SignalWatch calls on_signal(context, signal) on a thread of its own for
+// each stop or reload signal, as signals_wait reports them. The signals must
+// be blocked in every thread, with signals_block before any thread starts.
+typedef struct SignalWatch SignalWatch;
+
+[[nodiscard]] Error signal_watch_start(void (*on_signal)(void *context, Signal signal), void *context,
+                                       SignalWatch **watch, Err *err);
+// signal_watch_stop ends the watching thread; on_signal is not called after it returns.
+void signal_watch_stop(SignalWatch *watch);
 // process_signal sends pid the stop (SIGTERM) or reload (SIGHUP) signal; a
 // process that is gone is ERR_NOT_FOUND.
 [[nodiscard]] Error process_signal(int pid, Signal signal, Err *err);

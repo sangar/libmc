@@ -20,6 +20,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -474,6 +475,53 @@ Error file_lock(String path, int *fd, Err *err)
     }
     *fd = opened;
     return ERR_OK;
+}
+
+Error file_try_lock(String path, int *fd, bool *locked, Err *err)
+{
+    *fd = -1;
+    *locked = false;
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int opened = open(cpath.text, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (opened < 0) {
+        return posix_fail_errno(err, "open %s", cpath.text);
+    }
+    while (flock(opened, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            close(opened);
+            return ERR_OK;
+        }
+        if (errno != EINTR) {
+            Error failed = posix_fail_errno(err, "lock %s", cpath.text);
+            close(opened);
+            return failed;
+        }
+    }
+    *fd = opened;
+    *locked = true;
+    return ERR_OK;
+}
+
+bool file_find_upward(Arena *arena, String directory, StringList names, String *path)
+{
+    for (;;) {
+        for (size_t i = 0; i < names.count; i++) {
+            String candidate = path_join(arena, directory, names.items[i]);
+            if (file_exists(candidate)) {
+                *path = candidate;
+                return true;
+            }
+        }
+        String parent = path_dir(directory);
+        if (parent.len == 0 || str_equal(parent, directory)) {
+            return false;
+        }
+        directory = parent;
+    }
 }
 
 Error file_create_unique(Arena *arena, String pattern, String *path, int *fd, Err *err)
@@ -1667,6 +1715,38 @@ String host_short_name(Arena *arena)
     return str_copy(arena, name);
 }
 
+Error dir_runtime(Arena *arena, String name, String *path, Err *err)
+{
+    String base;
+    String runtime;
+    if (env_get(arena, S("XDG_RUNTIME_DIR"), &runtime) && runtime.len > 0) {
+        base = path_join(arena, runtime, name);
+    } else {
+        String temporary;
+        if (!env_get(arena, S("TMPDIR"), &temporary) || temporary.len == 0) {
+            temporary = S("/tmp");
+        }
+        base = path_join(arena, temporary, str_format(arena, "%.*s-%d", (int)name.len, name.data, (int)getuid()));
+    }
+    CPath cpath;
+    Error e = to_cpath(base, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    if (mkdir(cpath.text, 0700) != 0 && errno != EEXIST) {
+        return posix_fail_errno(err, "create %s", cpath.text);
+    }
+    struct stat st;
+    if (lstat(cpath.text, &st) != 0) {
+        return posix_fail_errno(err, "stat %s", cpath.text);
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+        return err_set(err, ERR_IO, "%s is not a private directory of this user", cpath.text);
+    }
+    *path = base;
+    return ERR_OK;
+}
+
 // ---- signals ----
 
 static void stop_and_reload(sigset_t *set)
@@ -1694,6 +1774,53 @@ Signal signals_wait(void)
             return number == SIGHUP ? SIGNAL_RELOAD : SIGNAL_STOP;
         }
     }
+}
+
+struct SignalWatch {
+    Arena *arena;
+    void (*on_signal)(void *context, Signal signal);
+    void *context;
+    Thread thread;
+    atomic_bool closing;
+};
+
+// watch_signals ends on the first signal after closing, which signal_watch_stop sends to this thread alone.
+static void *watch_signals(void *argument)
+{
+    SignalWatch *watch = argument;
+    for (;;) {
+        Signal signal = signals_wait();
+        if (atomic_load(&watch->closing)) {
+            return nullptr;
+        }
+        watch->on_signal(watch->context, signal);
+    }
+}
+
+Error signal_watch_start(void (*on_signal)(void *context, Signal signal), void *context, SignalWatch **watch,
+                         Err *err)
+{
+    Arena *arena = arena_create(0);
+    SignalWatch *w = arena_push(arena, sizeof *w);
+    w->arena = arena;
+    w->on_signal = on_signal;
+    w->context = context;
+    atomic_init(&w->closing, false);
+    Error e = thread_start(&w->thread, watch_signals, w, err);
+    if (e != ERR_OK) {
+        arena_destroy(arena);
+        return e;
+    }
+    *watch = w;
+    return ERR_OK;
+}
+
+void signal_watch_stop(SignalWatch *watch)
+{
+    atomic_store(&watch->closing, true);
+    pthread_kill(*as_thread(&watch->thread), SIGHUP);
+    thread_join(&watch->thread);
+    arena_destroy(watch->arena);
 }
 
 Error process_signal(int pid, Signal signal, Err *err)
