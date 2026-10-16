@@ -248,6 +248,10 @@ static void yaml_nodes_know_where_they_are_in_the_source(Test *test)
     const Node *home = node_get(node_get(stores, S("home")), S("role"));
     const Node *nas = node_get(node_get(stores, S("nas")), S("role"));
     test_check(test, home->line == 4 && nas->line == 5, "each node has its line");
+    test_check(test, root->line == 2 && stores->line == 3, "a block mapping, the line of its first key");
+    test_check(test, node_get(stores, S("home"))->line == 4, "however deep");
+    Node *list = parse_yaml(test, "items:\n\n  - a: 1\n  - b\n");
+    test_check(test, list != nullptr && node_get(list, S("items"))->line == 3, "a block sequence, its first item's");
     test_check_str(test, source_of(text, home), S("primary"), "a plain scalar spans its text");
     test_check_str(test, source_of(text, nas), S("mirror"), "a quoted scalar spans what is inside its quotes");
     test_check(test, node_scalar(test->arena, NODE_STRING, S("made"))->line == 0, "a node made in code has none");
