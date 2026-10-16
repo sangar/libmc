@@ -8,7 +8,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
 - **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The two vendored libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON and [cyaml](https://github.com/andrewmd5/cyaml) for YAML, are pinned in `deps.lock` and build into `libmc.a`.
-- **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services and the terminal.
+- **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services, the terminal, pseudo-terminals and system statistics.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
 ## Requirements
@@ -136,6 +136,8 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/platform/watch.h` | Recursive file watching on FSEvents and inotify, in settled batches of paths |
 | | `mc/platform/service.h` | Per-user login services: launchd agents and systemd user units |
 | | `mc/platform/terminal.h` | The controlling terminal in raw mode, its size, and waits that wake on input, resizes or another thread |
+| | `mc/platform/pty.h` | Programs run on a pseudo-terminal of their own: output, typed input, resizing, signals to the whole process group |
+| | `mc/platform/sysinfo.h` | CPU ticks per core, memory, swap, network bytes, load and uptime, and the CPU time and memory of a process group |
 | concurrency | `mc/concurrency/cancel.h` | Cancellation token with waits and sleeps that wake on cancel |
 | | `mc/concurrency/debounce.h` | Per-key debouncing: a callback once a key has been quiet for a delay |
 | | `mc/concurrency/queue.h` | Unbounded blocking FIFO of pointers, with close and timeouts |
