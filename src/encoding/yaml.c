@@ -191,6 +191,16 @@ static Node *convert_scalar(Converter *c, const cyaml_node_t *source)
     return e;
 }
 
+// first_line is where a block mapping or sequence starts, which the parser
+// does not record: the line of its first key or of its first item.
+static size_t first_line(const cyaml_node_t *source, const Node *node)
+{
+    if (source->type == CYAML_MAP && source->map.count > 0 && source->map.pairs[0].key != nullptr) {
+        return source->map.pairs[0].key->span.start_line;
+    }
+    return node->count > 0 ? node->items[0]->line : 0;
+}
+
 [[nodiscard]] static Error convert(Converter *c, const cyaml_node_t *source, Node **out)
 {
     if (source == nullptr || source->type == CYAML_NULL || source->type == CYAML_NONE) {
@@ -215,6 +225,9 @@ static Node *convert_scalar(Converter *c, const cyaml_node_t *source)
         strmap_put(c->anchored, address_key(&source), anchored);
     }
     Error e = source->type == CYAML_SCALAR ? ERR_OK : convert_children(c, source, *out);
+    if (e == ERR_OK && (*out)->line == 0) {
+        (*out)->line = first_line(source, *out);
+    }
     if (anchored != nullptr) {
         anchored->done = true;
     }
