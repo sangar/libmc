@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -450,6 +451,29 @@ Error file_create(String path, unsigned mode, int *fd, Err *err)
     }
     *fd = open(cpath.text, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, (mode_t)mode);
     return *fd >= 0 ? ERR_OK : posix_fail_errno(err, "create %s", cpath.text);
+}
+
+Error file_lock(String path, int *fd, Err *err)
+{
+    *fd = -1;
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int opened = open(cpath.text, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (opened < 0) {
+        return posix_fail_errno(err, "open %s", cpath.text);
+    }
+    while (flock(opened, LOCK_EX) != 0) {
+        if (errno != EINTR) {
+            Error failed = posix_fail_errno(err, "lock %s", cpath.text);
+            close(opened);
+            return failed;
+        }
+    }
+    *fd = opened;
+    return ERR_OK;
 }
 
 Error file_create_unique(Arena *arena, String pattern, String *path, int *fd, Err *err)
@@ -1461,6 +1485,80 @@ Error process_open_default(String path, Err *err)
     if (thread_start(&reaper, reap_child, (void *)(intptr_t)pid, nullptr) == ERR_OK) {
         thread_detach(&reaper);
     }
+    return ERR_OK;
+}
+
+// detach_child gives the child its own session, no blocked signals and the
+// default action for every signal this library or its caller may change.
+[[nodiscard]] static int detach_child(posix_spawnattr_t *attributes)
+{
+    sigset_t none;
+    sigemptyset(&none);
+    sigset_t defaults;
+    sigemptyset(&defaults);
+    const int changed[] = { SIGINT, SIGTERM, SIGHUP, SIGPIPE, SIGWINCH, SIGCHLD };
+    for (size_t i = 0; i < countof(changed); i++) {
+        sigaddset(&defaults, changed[i]);
+    }
+    int rc = posix_spawnattr_setsigmask(attributes, &none);
+    if (rc == 0) {
+        rc = posix_spawnattr_setsigdefault(attributes, &defaults);
+    }
+    if (rc == 0) {
+        rc = posix_spawnattr_setflags(attributes,
+                                      (short)(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSID));
+    }
+    return rc;
+}
+
+Error process_spawn_detached(Arena *scratch, StringList argv, String output_path, int *pid, Err *err)
+{
+    *pid = 0;
+    if (argv.count == 0) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "spawn: no program");
+    }
+    CPath output;
+    Error e = to_cpath(output_path.len > 0 ? output_path : S("/dev/null"), &output, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    char **items = build_argv(scratch, argv);
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc != 0) {
+        return err_set(err, ERR_PLATFORM, "spawn %s: %s", items[0], strerror(rc));
+    }
+    rc = posix_spawnattr_init(&attributes);
+    if (rc != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        return err_set(err, ERR_PLATFORM, "spawn %s: %s", items[0], strerror(rc));
+    }
+    rc = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (rc == 0) {
+        rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output.text, O_WRONLY | O_CREAT | O_APPEND,
+                                              0600);
+    }
+    if (rc == 0) {
+        rc = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    }
+    if (rc == 0) {
+        rc = detach_child(&attributes);
+    }
+    pid_t child;
+    if (rc == 0) {
+        rc = posix_spawnp(&child, items[0], &actions, &attributes, items, environ);
+    }
+    posix_spawnattr_destroy(&attributes);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        return spawn_failed(err, rc, items[0]);
+    }
+    Thread reaper;
+    if (thread_start(&reaper, reap_child, (void *)(intptr_t)child, nullptr) == ERR_OK) {
+        thread_detach(&reaper);
+    }
+    *pid = (int)child;
     return ERR_OK;
 }
 

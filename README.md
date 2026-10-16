@@ -132,7 +132,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
 | | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing |
-| platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files and mappings, directories with metadata, processes, environment, signals, TCP and Unix sockets |
+| platform | `mc/platform/platform.h` | Clock, locale-independent floats, threads, files and mappings, directories with metadata, advisory file locks, processes (also detached into a session of their own), environment, signals, TCP and Unix sockets |
 | | `mc/platform/watch.h` | Recursive file watching on FSEvents and inotify, in settled batches of paths |
 | | `mc/platform/service.h` | Per-user login services: launchd agents and systemd user units |
 | | `mc/platform/terminal.h` | The controlling terminal in raw mode, its size, and waits that wake on input, resizes or another thread |
@@ -145,6 +145,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | encoding | `mc/encoding/node.h` | Document tree of scalars, sequences and mappings shared by the parsers |
 | | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting, on yyjson |
 | | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
+| | `mc/encoding/dotenv.h` | `.env` files into `NAME=value` entries, with quotes and comments and no expansion |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 
 The header comments document each function's contract.
