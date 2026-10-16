@@ -3,6 +3,7 @@
 #include <locale.h>
 #include <math.h>
 
+#include "mc/encoding/dotenv.h"
 #include "mc/encoding/json.h"
 #include "mc/encoding/yaml.h"
 
@@ -247,6 +248,10 @@ static void yaml_nodes_know_where_they_are_in_the_source(Test *test)
     const Node *home = node_get(node_get(stores, S("home")), S("role"));
     const Node *nas = node_get(node_get(stores, S("nas")), S("role"));
     test_check(test, home->line == 4 && nas->line == 5, "each node has its line");
+    test_check(test, root->line == 2 && stores->line == 3, "a block mapping, the line of its first key");
+    test_check(test, node_get(stores, S("home"))->line == 4, "however deep");
+    Node *list = parse_yaml(test, "items:\n\n  - a: 1\n  - b\n");
+    test_check(test, list != nullptr && node_get(list, S("items"))->line == 3, "a block sequence, its first item's");
     test_check_str(test, source_of(text, home), S("primary"), "a plain scalar spans its text");
     test_check_str(test, source_of(text, nas), S("mirror"), "a quoted scalar spans what is inside its quotes");
     test_check(test, node_scalar(test->arena, NODE_STRING, S("made"))->line == 0, "a node made in code has none");
@@ -273,6 +278,39 @@ static void yaml_rejects_malformed_input(Test *test)
     test_check_str(test, S(err.msg), S("yaml: line 1, column 14: alias inside the node it names"), "names the alias");
 }
 
+static void dotenv_reads_names_and_values(Test *test)
+{
+    static const char TEXT[] = "# settings\n"
+                               "PORT=3000\n"
+                               "export RAILS_ENV = development  # a comment\n"
+                               "\r\n"
+                               "QUOTED='a # b $HOME'\n"
+                               "ESCAPED=\"line\\none \\\"x\\\" \\$y\"\n"
+                               "EMPTY=\n"
+                               "HASH=a#b\r\n";
+    StringList entries = { 0 };
+    Err err = { 0 };
+    test_check(test, dotenv_parse(test->arena, S(TEXT), &entries, &err) == ERR_OK, err.msg);
+    test_check(test, entries.count == 6, "every assignment, in order");
+    if (entries.count == 6) {
+        test_check_str(test, entries.items[0], S("PORT=3000"), "plain");
+        test_check_str(test, entries.items[1], S("RAILS_ENV=development"), "export, spaces and a comment");
+        test_check_str(test, entries.items[2], S("QUOTED=a # b $HOME"), "single quotes keep everything");
+        test_check_str(test, entries.items[3], S("ESCAPED=line\none \"x\" $y"), "double quotes read escapes");
+        test_check_str(test, entries.items[4], S("EMPTY="), "an empty value");
+        test_check_str(test, entries.items[5], S("HASH=a#b"), "a # inside a word stays");
+    }
+    const char *const invalid[] = { "JUST_A_NAME\n", "1X=a\n", "A='open\n", "A=\"x\" y\n", "A=\"\\q\"\n" };
+    for (size_t i = 0; i < countof(invalid); i++) {
+        StringList ignored = { 0 };
+        if (dotenv_parse(test->arena, S(invalid[i]), &ignored, nullptr) != ERR_PARSE) {
+            test_check(test, false, str_cstr(test->arena, str_format(test->arena, "rejects %s", invalid[i])));
+        }
+    }
+    test_check(test, dotenv_parse(test->arena, S("A=1\nB\n"), &entries, &err) == ERR_PARSE, "a line without =");
+    test_check_str(test, S(err.msg), S("dotenv: line 2: expected NAME=value"), "says which line");
+}
+
 const TestCase ENCODING_TESTS[] = {
     { "json_parses_every_kind", json_parses_every_kind },
     { "json_decodes_strings", json_decodes_strings },
@@ -285,5 +323,6 @@ const TestCase ENCODING_TESTS[] = {
     { "yaml_reads_block_and_flow_collections", yaml_reads_block_and_flow_collections },
     { "yaml_nodes_know_where_they_are_in_the_source", yaml_nodes_know_where_they_are_in_the_source },
     { "yaml_rejects_malformed_input", yaml_rejects_malformed_input },
+    { "dotenv_reads_names_and_values", dotenv_reads_names_and_values },
     { nullptr, nullptr },
 };

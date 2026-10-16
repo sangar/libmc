@@ -24,6 +24,8 @@ typedef struct PtySize {
 typedef enum PtySignal {
     PTY_INTERRUPT, // SIGINT, what Ctrl-C sends
     PTY_TERMINATE, // SIGTERM
+    PTY_RELOAD,    // SIGHUP, which a daemon takes as reload, as SIGNAL_RELOAD does
+    PTY_QUIT,      // SIGQUIT, what Ctrl-\ sends
     PTY_KILL,      // SIGKILL
 } PtySignal;
 

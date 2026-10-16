@@ -187,11 +187,55 @@ static void terminal_closes_on_a_pseudo_terminal(Test *test)
     pty_close(&pty);
 }
 
+// caught runs a shell that says which of HUP and QUIT it gets, sends it
+// signal, and returns what it said.
+static String caught(Test *test, PtySignal signal)
+{
+    Arena *a = test->arena;
+    Pty pty;
+    const char *script = "trap 'echo got HUP; exit 0' HUP; trap 'echo got QUIT; exit 0' QUIT; echo ready; "
+                         "while :; do sleep 0.05; done";
+    if (pty_spawn(a, shell(a, script), S(""), (StringList) { 0 }, SIZE, &pty, nullptr) != ERR_OK) {
+        return S("");
+    }
+    StringBuilder output = str_builder_create(a, 256);
+    String said = S("");
+    bool sent = false;
+    int64_t deadline = clock_monotonic_ns() + (int64_t)OUTPUT_DEADLINE_MS * NS_PER_MILLISECOND;
+    while (!str_contains(said, S("got ")) && clock_monotonic_ns() < deadline) {
+        char buffer[256];
+        size_t got;
+        if (pty_read(&pty, 50, buffer, sizeof buffer, &got) == PTY_DATA) {
+            str_builder_append(&output, (String) { buffer, got });
+            said = str_builder_finish(&output);
+        }
+        if (!sent && str_contains(said, S("ready"))) {
+            sent = pty_signal(&pty, signal, nullptr) == ERR_OK;
+        }
+    }
+    int exit_code;
+    int ended;
+    if (!wait_for_exit(&pty, &exit_code, &ended)) {
+        Error killed = pty_signal(&pty, PTY_KILL, nullptr);
+        unused(killed);
+        wait_for_exit(&pty, &exit_code, &ended);
+    }
+    pty_close(&pty);
+    return said;
+}
+
+static void pty_sends_reload_and_quit(Test *test)
+{
+    test_check(test, str_contains(caught(test, PTY_RELOAD), S("got HUP")), "SIGHUP");
+    test_check(test, str_contains(caught(test, PTY_QUIT), S("got QUIT")), "SIGQUIT");
+}
+
 const TestCase PTY_TESTS[] = {
     { "pty_runs_a_program_on_a_terminal", pty_runs_a_program_on_a_terminal },
     { "pty_passes_input_and_signals_the_group", pty_passes_input_and_signals_the_group },
     { "pty_env_removes_and_finds_programs_on_the_childs_path", pty_env_removes_and_finds_programs_on_the_childs_path },
     { "pty_reports_what_cannot_start", pty_reports_what_cannot_start },
     { "terminal_closes_on_a_pseudo_terminal", terminal_closes_on_a_pseudo_terminal },
+    { "pty_sends_reload_and_quit", pty_sends_reload_and_quit },
     { nullptr, nullptr },
 };

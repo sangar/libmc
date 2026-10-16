@@ -20,9 +20,11 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -450,6 +452,76 @@ Error file_create(String path, unsigned mode, int *fd, Err *err)
     }
     *fd = open(cpath.text, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, (mode_t)mode);
     return *fd >= 0 ? ERR_OK : posix_fail_errno(err, "create %s", cpath.text);
+}
+
+Error file_lock(String path, int *fd, Err *err)
+{
+    *fd = -1;
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int opened = open(cpath.text, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (opened < 0) {
+        return posix_fail_errno(err, "open %s", cpath.text);
+    }
+    while (flock(opened, LOCK_EX) != 0) {
+        if (errno != EINTR) {
+            Error failed = posix_fail_errno(err, "lock %s", cpath.text);
+            close(opened);
+            return failed;
+        }
+    }
+    *fd = opened;
+    return ERR_OK;
+}
+
+Error file_try_lock(String path, int *fd, bool *locked, Err *err)
+{
+    *fd = -1;
+    *locked = false;
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int opened = open(cpath.text, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (opened < 0) {
+        return posix_fail_errno(err, "open %s", cpath.text);
+    }
+    while (flock(opened, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            close(opened);
+            return ERR_OK;
+        }
+        if (errno != EINTR) {
+            Error failed = posix_fail_errno(err, "lock %s", cpath.text);
+            close(opened);
+            return failed;
+        }
+    }
+    *fd = opened;
+    *locked = true;
+    return ERR_OK;
+}
+
+bool file_find_upward(Arena *arena, String directory, StringList names, String *path)
+{
+    for (;;) {
+        for (size_t i = 0; i < names.count; i++) {
+            String candidate = path_join(arena, directory, names.items[i]);
+            if (file_exists(candidate)) {
+                *path = candidate;
+                return true;
+            }
+        }
+        String parent = path_dir(directory);
+        if (parent.len == 0 || str_equal(parent, directory)) {
+            return false;
+        }
+        directory = parent;
+    }
 }
 
 Error file_create_unique(Arena *arena, String pattern, String *path, int *fd, Err *err)
@@ -1464,6 +1536,80 @@ Error process_open_default(String path, Err *err)
     return ERR_OK;
 }
 
+// detach_child gives the child its own session, no blocked signals and the
+// default action for every signal this library or its caller may change.
+[[nodiscard]] static int detach_child(posix_spawnattr_t *attributes)
+{
+    sigset_t none;
+    sigemptyset(&none);
+    sigset_t defaults;
+    sigemptyset(&defaults);
+    const int changed[] = { SIGINT, SIGTERM, SIGHUP, SIGPIPE, SIGWINCH, SIGCHLD };
+    for (size_t i = 0; i < countof(changed); i++) {
+        sigaddset(&defaults, changed[i]);
+    }
+    int rc = posix_spawnattr_setsigmask(attributes, &none);
+    if (rc == 0) {
+        rc = posix_spawnattr_setsigdefault(attributes, &defaults);
+    }
+    if (rc == 0) {
+        rc = posix_spawnattr_setflags(attributes,
+                                      (short)(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSID));
+    }
+    return rc;
+}
+
+Error process_spawn_detached(Arena *scratch, StringList argv, String output_path, int *pid, Err *err)
+{
+    *pid = 0;
+    if (argv.count == 0) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "spawn: no program");
+    }
+    CPath output;
+    Error e = to_cpath(output_path.len > 0 ? output_path : S("/dev/null"), &output, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    char **items = build_argv(scratch, argv);
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc != 0) {
+        return err_set(err, ERR_PLATFORM, "spawn %s: %s", items[0], strerror(rc));
+    }
+    rc = posix_spawnattr_init(&attributes);
+    if (rc != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        return err_set(err, ERR_PLATFORM, "spawn %s: %s", items[0], strerror(rc));
+    }
+    rc = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (rc == 0) {
+        rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output.text, O_WRONLY | O_CREAT | O_APPEND,
+                                              0600);
+    }
+    if (rc == 0) {
+        rc = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    }
+    if (rc == 0) {
+        rc = detach_child(&attributes);
+    }
+    pid_t child;
+    if (rc == 0) {
+        rc = posix_spawnp(&child, items[0], &actions, &attributes, items, environ);
+    }
+    posix_spawnattr_destroy(&attributes);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        return spawn_failed(err, rc, items[0]);
+    }
+    Thread reaper;
+    if (thread_start(&reaper, reap_child, (void *)(intptr_t)child, nullptr) == ERR_OK) {
+        thread_detach(&reaper);
+    }
+    *pid = (int)child;
+    return ERR_OK;
+}
+
 bool process_alive(int pid)
 {
     return kill((pid_t)pid, 0) == 0 || errno == EPERM;
@@ -1569,6 +1715,38 @@ String host_short_name(Arena *arena)
     return str_copy(arena, name);
 }
 
+Error dir_runtime(Arena *arena, String name, String *path, Err *err)
+{
+    String base;
+    String runtime;
+    if (env_get(arena, S("XDG_RUNTIME_DIR"), &runtime) && runtime.len > 0) {
+        base = path_join(arena, runtime, name);
+    } else {
+        String temporary;
+        if (!env_get(arena, S("TMPDIR"), &temporary) || temporary.len == 0) {
+            temporary = S("/tmp");
+        }
+        base = path_join(arena, temporary, str_format(arena, "%.*s-%d", (int)name.len, name.data, (int)getuid()));
+    }
+    CPath cpath;
+    Error e = to_cpath(base, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    if (mkdir(cpath.text, 0700) != 0 && errno != EEXIST) {
+        return posix_fail_errno(err, "create %s", cpath.text);
+    }
+    struct stat st;
+    if (lstat(cpath.text, &st) != 0) {
+        return posix_fail_errno(err, "stat %s", cpath.text);
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+        return err_set(err, ERR_IO, "%s is not a private directory of this user", cpath.text);
+    }
+    *path = base;
+    return ERR_OK;
+}
+
 // ---- signals ----
 
 static void stop_and_reload(sigset_t *set)
@@ -1596,6 +1774,53 @@ Signal signals_wait(void)
             return number == SIGHUP ? SIGNAL_RELOAD : SIGNAL_STOP;
         }
     }
+}
+
+struct SignalWatch {
+    Arena *arena;
+    void (*on_signal)(void *context, Signal signal);
+    void *context;
+    Thread thread;
+    atomic_bool closing;
+};
+
+// watch_signals ends on the first signal after closing, which signal_watch_stop sends to this thread alone.
+static void *watch_signals(void *argument)
+{
+    SignalWatch *watch = argument;
+    for (;;) {
+        Signal signal = signals_wait();
+        if (atomic_load(&watch->closing)) {
+            return nullptr;
+        }
+        watch->on_signal(watch->context, signal);
+    }
+}
+
+Error signal_watch_start(void (*on_signal)(void *context, Signal signal), void *context, SignalWatch **watch,
+                         Err *err)
+{
+    Arena *arena = arena_create(0);
+    SignalWatch *w = arena_push(arena, sizeof *w);
+    w->arena = arena;
+    w->on_signal = on_signal;
+    w->context = context;
+    atomic_init(&w->closing, false);
+    Error e = thread_start(&w->thread, watch_signals, w, err);
+    if (e != ERR_OK) {
+        arena_destroy(arena);
+        return e;
+    }
+    *watch = w;
+    return ERR_OK;
+}
+
+void signal_watch_stop(SignalWatch *watch)
+{
+    atomic_store(&watch->closing, true);
+    pthread_kill(*as_thread(&watch->thread), SIGHUP);
+    thread_join(&watch->thread);
+    arena_destroy(watch->arena);
 }
 
 Error process_signal(int pid, Signal signal, Err *err)

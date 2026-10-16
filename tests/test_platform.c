@@ -1,10 +1,13 @@
 #include "test.h"
 
 #include "mc/text/path.h"
+#include "mc/platform/frame.h"
 #include "mc/platform/platform.h"
 #include "mc/platform/terminal.h"
 
 #include <signal.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 
 static void files_round_trip_in_a_temp_dir(Test *test)
 {
@@ -483,6 +486,205 @@ static void network_reports_the_port_it_chose(Test *test)
     net_close(listener);
 }
 
+typedef struct LockWaiter {
+    String path;
+    atomic_bool locked;
+} LockWaiter;
+
+static void *wait_for_lock(void *argument)
+{
+    LockWaiter *waiter = argument;
+    int fd;
+    if (file_lock(waiter->path, &fd, nullptr) == ERR_OK) {
+        atomic_store(&waiter->locked, true);
+        file_close(fd);
+    }
+    return nullptr;
+}
+
+static void file_lock_keeps_out_a_second_holder(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    LockWaiter waiter = { .path = path_join(a, dir, S("lock")) };
+    atomic_init(&waiter.locked, false);
+    int fd;
+    test_check(test, file_lock(waiter.path, &fd, &err) == ERR_OK, "lock creates the file");
+    Thread thread;
+    test_check(test, thread_start(&thread, wait_for_lock, &waiter, &err) == ERR_OK, "start a waiter");
+    clock_sleep_ms(100);
+    test_check(test, !atomic_load(&waiter.locked), "the second holder waits");
+    file_close(fd);
+    thread_join(&thread);
+    test_check(test, atomic_load(&waiter.locked), "and gets the lock once it is closed");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
+static void detached_processes_lead_a_session_and_write_to_a_file(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    String output = path_join(a, dir, S("out.log"));
+    const char *const script[] = { "/bin/sh", "-c", "echo \"$$ $(ps -o pgid= -p $$)\"; echo oops >&2" };
+    int pid = 0;
+    test_check(test, process_spawn_detached(a, strlist_of(a, countof(script), script), output, &pid, &err) == ERR_OK,
+               err.msg);
+    String text = S("");
+    for (int tries = 0; tries < 500 && str_count_char(text, '\n') < 2; tries++) {
+        clock_sleep_ms(10);
+        if (file_read_all(a, output, &text, nullptr) != ERR_OK) {
+            text = S("");
+        }
+    }
+    StringList words = str_fields(a, text);
+    test_check(test, words.count == 3, "output and errors land in the file");
+    test_check(test, words.count == 3 && str_equal(words.items[0], words.items[1]), "it leads its own process group");
+    test_check(test, words.count == 3 && str_equal(words.items[0], str_format(a, "%d", pid)), "the pid it reported");
+    const char *const missing[] = { "mc-no-such-program" };
+    test_check(test, process_spawn_detached(a, strlist_of(a, 1, missing), S(""), &pid, &err) == ERR_NOT_FOUND,
+               "a missing program");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
+static void file_try_lock_does_not_wait(Test *test)
+{
+    Arena *a = test->arena;
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, nullptr) == ERR_OK, "a temp dir");
+    String path = path_join(a, dir, S("lock"));
+    int held;
+    bool locked;
+    test_check(test, file_try_lock(path, &held, &locked, nullptr) == ERR_OK && locked, "a free lock is taken");
+    int second;
+    test_check(test, file_try_lock(path, &second, &locked, nullptr) == ERR_OK && !locked && second == -1,
+               "a held one is not, at once");
+    file_close(held);
+    test_check(test, file_try_lock(path, &second, &locked, nullptr) == ERR_OK && locked, "free again once closed");
+    file_close(second);
+    test_check(test, dir_remove_all(dir, nullptr) == ERR_OK, "clean up");
+}
+
+static void file_find_upward_climbs(Test *test)
+{
+    Arena *a = test->arena;
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, nullptr) == ERR_OK, "a temp dir");
+    String deep = path_join(a, dir, S("a/b/c"));
+    test_check(test, dir_create_all(deep, 0700, nullptr) == ERR_OK, "make directories");
+    test_check(test, file_write_all(path_join(a, dir, S("a/second.yml")), S(""), 0600, nullptr) == ERR_OK, "write");
+    test_check(test, file_write_all(path_join(a, dir, S("first.yml")), S(""), 0600, nullptr) == ERR_OK, "write");
+    const char *const names[] = { "first.yml", "second.yml" };
+    String found;
+    test_check(test, file_find_upward(a, deep, strlist_of(a, countof(names), names), &found), "found from below");
+    test_check_str(test, found, path_join(a, dir, S("a/second.yml")), "the nearest, whichever name it has");
+    const char *const missing[] = { "mc-no-such-file-anywhere" };
+    test_check(test, !file_find_upward(a, deep, strlist_of(a, 1, missing), &found), "up to the root");
+    test_check(test, dir_remove_all(dir, nullptr) == ERR_OK, "clean up");
+}
+
+static void dir_runtime_is_private(Test *test)
+{
+    Arena *a = test->arena;
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, nullptr) == ERR_OK, "a temp dir");
+    String saved_xdg = S("");
+    String saved_tmp = S("");
+    bool had_xdg = env_get(a, S("XDG_RUNTIME_DIR"), &saved_xdg);
+    bool had_tmp = env_get(a, S("TMPDIR"), &saved_tmp);
+    env_unset(S("XDG_RUNTIME_DIR"));
+    test_check(test, env_set(S("TMPDIR"), dir, nullptr) == ERR_OK, "point TMPDIR at it");
+    String path;
+    Err err = { 0 };
+    test_check(test, dir_runtime(a, S("app"), &path, &err) == ERR_OK, err.msg);
+    test_check_str(test, path, path_join(a, dir, str_format(a, "app-%d", process_user_id())), "name-uid in TMPDIR");
+    FileInfo info = { 0 };
+    test_check(test, file_info(path, &info, nullptr) == ERR_OK && info.is_dir && (info.mode & 0777) == 0700,
+               "made with 0700");
+    test_check(test, dir_runtime(a, S("app"), &path, &err) == ERR_OK, "and found again");
+    test_check(test, dir_create(path_join(a, dir, str_format(a, "open-%d", process_user_id())), 0755, nullptr) ==
+                         ERR_OK,
+               "a directory others can enter");
+    test_check(test, dir_runtime(a, S("open"), &path, &err) == ERR_IO, "is refused");
+    test_check(test, env_set(S("XDG_RUNTIME_DIR"), dir, nullptr) == ERR_OK, "set XDG_RUNTIME_DIR");
+    test_check(test, dir_runtime(a, S("app"), &path, &err) == ERR_OK, err.msg);
+    test_check_str(test, path, path_join(a, dir, S("app")), "which wins");
+    had_xdg ? (void)env_set(S("XDG_RUNTIME_DIR"), saved_xdg, nullptr) : env_unset(S("XDG_RUNTIME_DIR"));
+    had_tmp ? (void)env_set(S("TMPDIR"), saved_tmp, nullptr) : env_unset(S("TMPDIR"));
+    test_check(test, dir_remove_all(dir, nullptr) == ERR_OK, "clean up");
+}
+
+static void on_signal(void *context, Signal signal)
+{
+    atomic_int *heard = context;
+    atomic_store(heard, signal == SIGNAL_STOP ? 1 : 2);
+}
+
+// signal_watch_round_trip blocks the signals, as a program that watches them
+// does, sends itself a stop, and aborts once the watch heard it and stopped.
+void signal_watch_round_trip(void)
+{
+    signals_block();
+    atomic_int heard;
+    atomic_init(&heard, 0);
+    SignalWatch *watch;
+    if (signal_watch_start(on_signal, &heard, &watch, nullptr) != ERR_OK) {
+        return;
+    }
+    Error sent = process_signal(process_id(), SIGNAL_STOP, nullptr);
+    unused(sent);
+    for (int i = 0; i < 200 && atomic_load(&heard) == 0; i++) {
+        clock_sleep_ms(10);
+    }
+    signal_watch_stop(watch);
+    if (atomic_load(&heard) == 1) {
+        abort();
+    }
+}
+
+static void signal_watch_calls_back(Test *test)
+{
+    test_check_aborts(test, "signal_watch_round_trip", "a stop signal reaches the callback, and the watch stops");
+}
+
+static void frames_cross_a_socket_whole(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "a temp dir");
+    String path = path_join(a, dir, S("s"));
+    int listener;
+    int client;
+    int server;
+    test_check(test, net_listen_unix(path, 0600, &listener, &err) == ERR_OK, "listen");
+    test_check(test, net_connect_unix(path, &client, &err) == ERR_OK, "connect");
+    test_check(test, net_accept(listener, 1000, &server), "accept");
+    String bytes = frame_encode(a, S("{\"type\":\"output\"}"), S("hello\r\n"));
+    test_check(test, net_send(client, str_slice(bytes, 0, 3), &err) == ERR_OK, "send a piece");
+    test_check(test, net_send(client, str_slice(bytes, 3, bytes.len), &err) == ERR_OK, "send the rest");
+    test_check(test, frame_send(client, a, S("{}"), S(""), &err) == ERR_OK, "a frame without a body");
+    test_check(test, frame_send(client, a, S("big"), str_repeat(a, S("x"), 100), &err) == ERR_OK, "one too big");
+    Frame frame;
+    test_check(test, frame_receive(server, a, 64, &frame, &err) == ERR_OK, err.msg);
+    test_check_str(test, frame.header, S("{\"type\":\"output\"}"), "the header");
+    test_check_str(test, frame.body, S("hello\r\n"), "the body");
+    test_check(test, frame_receive(server, a, 64, &frame, &err) == ERR_OK && frame.body.len == 0, "an empty body");
+    test_check(test, frame_receive(server, a, 64, &frame, &err) == ERR_PARSE, "over the limit");
+    net_close(client);
+    net_close(server);
+    test_check(test, net_connect_unix(path, &client, &err) == ERR_OK, "connect again");
+    test_check(test, net_accept(listener, 1000, &server), "accept again");
+    net_close(client);
+    test_check(test, frame_receive(server, a, 64, &frame, &err) == ERR_CANCELLED, "a close between frames");
+    net_close(server);
+    net_close(listener);
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
 const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
@@ -501,5 +703,12 @@ const TestCase PLATFORM_TESTS[] = {
     { "files_map_and_append", files_map_and_append },
     { "unix_sockets_carry_bytes", unix_sockets_carry_bytes },
     { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
+    { "file_lock_keeps_out_a_second_holder", file_lock_keeps_out_a_second_holder },
+    { "detached_processes_lead_a_session_and_write_to_a_file", detached_processes_lead_a_session_and_write_to_a_file },
+    { "file_try_lock_does_not_wait", file_try_lock_does_not_wait },
+    { "file_find_upward_climbs", file_find_upward_climbs },
+    { "dir_runtime_is_private", dir_runtime_is_private },
+    { "signal_watch_calls_back", signal_watch_calls_back },
+    { "frames_cross_a_socket_whole", frames_cross_a_socket_whole },
     { nullptr, nullptr },
 };
