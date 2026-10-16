@@ -5,6 +5,7 @@
 #include "mc/platform/terminal.h"
 
 #include <signal.h>
+#include <stdatomic.h>
 
 static void files_round_trip_in_a_temp_dir(Test *test)
 {
@@ -483,6 +484,70 @@ static void network_reports_the_port_it_chose(Test *test)
     net_close(listener);
 }
 
+typedef struct LockWaiter {
+    String path;
+    atomic_bool locked;
+} LockWaiter;
+
+static void *wait_for_lock(void *argument)
+{
+    LockWaiter *waiter = argument;
+    int fd;
+    if (file_lock(waiter->path, &fd, nullptr) == ERR_OK) {
+        atomic_store(&waiter->locked, true);
+        file_close(fd);
+    }
+    return nullptr;
+}
+
+static void file_lock_keeps_out_a_second_holder(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    LockWaiter waiter = { .path = path_join(a, dir, S("lock")) };
+    atomic_init(&waiter.locked, false);
+    int fd;
+    test_check(test, file_lock(waiter.path, &fd, &err) == ERR_OK, "lock creates the file");
+    Thread thread;
+    test_check(test, thread_start(&thread, wait_for_lock, &waiter, &err) == ERR_OK, "start a waiter");
+    clock_sleep_ms(100);
+    test_check(test, !atomic_load(&waiter.locked), "the second holder waits");
+    file_close(fd);
+    thread_join(&thread);
+    test_check(test, atomic_load(&waiter.locked), "and gets the lock once it is closed");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
+static void detached_processes_lead_a_session_and_write_to_a_file(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    String output = path_join(a, dir, S("out.log"));
+    const char *const script[] = { "/bin/sh", "-c", "echo \"$$ $(ps -o pgid= -p $$)\"; echo oops >&2" };
+    int pid = 0;
+    test_check(test, process_spawn_detached(a, strlist_of(a, countof(script), script), output, &pid, &err) == ERR_OK,
+               err.msg);
+    String text = S("");
+    for (int tries = 0; tries < 500 && str_count_char(text, '\n') < 2; tries++) {
+        clock_sleep_ms(10);
+        if (file_read_all(a, output, &text, nullptr) != ERR_OK) {
+            text = S("");
+        }
+    }
+    StringList words = str_fields(a, text);
+    test_check(test, words.count == 3, "output and errors land in the file");
+    test_check(test, words.count == 3 && str_equal(words.items[0], words.items[1]), "it leads its own process group");
+    test_check(test, words.count == 3 && str_equal(words.items[0], str_format(a, "%d", pid)), "the pid it reported");
+    const char *const missing[] = { "mc-no-such-program" };
+    test_check(test, process_spawn_detached(a, strlist_of(a, 1, missing), S(""), &pid, &err) == ERR_NOT_FOUND,
+               "a missing program");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
+}
+
 const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
@@ -501,5 +566,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "files_map_and_append", files_map_and_append },
     { "unix_sockets_carry_bytes", unix_sockets_carry_bytes },
     { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
+    { "file_lock_keeps_out_a_second_holder", file_lock_keeps_out_a_second_holder },
+    { "detached_processes_lead_a_session_and_write_to_a_file", detached_processes_lead_a_session_and_write_to_a_file },
     { nullptr, nullptr },
 };

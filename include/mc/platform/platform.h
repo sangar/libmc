@@ -91,6 +91,10 @@ bool file_exists(String path);
 // file_create_unique replaces the trailing XXXXXX of pattern with a unique name, creates that file and stores its path.
 [[nodiscard]] Error file_create_unique(Arena *arena, String pattern, String *path, int *fd, Err *err);
 void file_close(int fd);
+// file_lock opens path, creating it with mode 0600 when missing, and waits for
+// an exclusive lock on it, held until file_close(*fd). The lock is advisory:
+// it keeps out only others that take it, in this process or another.
+[[nodiscard]] Error file_lock(String path, int *fd, Err *err);
 // file_read reads up to capacity bytes; *got is 0 at end of file.
 [[nodiscard]] Error file_read(int fd, void *buffer, size_t capacity, size_t *got, Err *err);
 [[nodiscard]] Error file_pread(int fd, void *buffer, size_t capacity, int64_t offset, size_t *got, Err *err);
@@ -190,6 +194,14 @@ int process_user_id(void);
 // it, with open on macOS and xdg-open elsewhere, and does not wait for it.
 // The program's input and output are the null device.
 [[nodiscard]] Error process_open_default(String path, Err *err);
+// process_spawn_detached starts argv, argv.items[0] looked up on PATH, in a
+// session of its own, so it outlives this process and its terminal, and does
+// not wait for it. Its input is the null device; its output and errors are
+// appended to output_path, created with mode 0600 when missing, or go to the
+// null device when output_path is empty. It starts with no signal blocked and
+// every signal's default action. A thread of this process reaps it once it
+// ends. A program that cannot be started is ERR_NOT_FOUND or ERR_PLATFORM.
+[[nodiscard]] Error process_spawn_detached(Arena *scratch, StringList argv, String output_path, int *pid, Err *err);
 bool process_alive(int pid);
 // process_raise_file_limit lifts this process's soft limit on open descriptors to the hard limit.
 [[nodiscard]] Error process_raise_file_limit(Err *err);
