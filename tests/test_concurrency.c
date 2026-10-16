@@ -4,8 +4,10 @@
 
 #include "mc/concurrency/cancel.h"
 #include "mc/concurrency/debounce.h"
+#include "mc/concurrency/outbox.h"
 #include "mc/concurrency/queue.h"
 #include "mc/concurrency/threadpool.h"
+#include "mc/concurrency/waker.h"
 
 typedef struct {
     Cancel *cancel;
@@ -277,6 +279,45 @@ static void debounce_fires_each_key_once_after_quiet(Test *test)
     mutex_destroy(&firings.mutex);
 }
 
+static void outbox_keeps_order_and_drops_a_slow_peer(Test *test)
+{
+    Outbox *outbox = outbox_create(16);
+    test_check(test, outbox_put(outbox, S("abc")), "put");
+    String parts[] = { S("de"), S(""), S("fg") };
+    test_check(test, outbox_put_parts(outbox, parts, countof(parts)), "put parts together");
+    test_check_str(test, outbox_take(outbox), S("abcdefg"), "take hands over all that waits, in order");
+    test_check(test, outbox_put(outbox, S("0123456789abcdef")), "up to the limit");
+    test_check(test, !outbox_put(outbox, S("x")), "past it closes the outbox");
+    test_check(test, !outbox_put(outbox, S("y")), "and nothing goes in after");
+    test_check_str(test, outbox_take(outbox), S("0123456789abcdef"), "what came before still goes out");
+    test_check(test, outbox_take(outbox).len == 0, "then take ends");
+    outbox_destroy(outbox);
+}
+
+static void *wake_later(void *argument)
+{
+    clock_sleep_ms(50);
+    waker_wake(argument);
+    return nullptr;
+}
+
+static void waker_keeps_a_wake_until_waited_for(Test *test)
+{
+    Waker waker;
+    waker_init(&waker);
+    waker_wake(&waker);
+    waker_wake(&waker);
+    test_check(test, waker_wait(&waker, 1000), "a wake before the wait counts");
+    test_check(test, !waker_wait(&waker, 20), "two wakes wake once");
+    Thread thread;
+    test_check(test, thread_start(&thread, wake_later, &waker, nullptr) == ERR_OK, "start a waker");
+    int64_t started = clock_monotonic_ns();
+    test_check(test, waker_wait(&waker, 5000), "a wake from another thread");
+    test_check(test, clock_monotonic_ns() - started < 4 * (int64_t)NS_PER_SECOND, "ends the wait early");
+    thread_join(&thread);
+    waker_destroy(&waker);
+}
+
 const TestCase CONCURRENCY_TESTS[] = {
     { "cancel_wakes_sleepers", cancel_wakes_sleepers },
     { "queue_keeps_order_across_growth", queue_keeps_order_across_growth },
@@ -285,5 +326,7 @@ const TestCase CONCURRENCY_TESTS[] = {
     { "threadpool_runs_tasks_and_chunks", threadpool_runs_tasks_and_chunks },
     { "threads_run_each_runs_every_index", threads_run_each_runs_every_index },
     { "debounce_fires_each_key_once_after_quiet", debounce_fires_each_key_once_after_quiet },
+    { "outbox_keeps_order_and_drops_a_slow_peer", outbox_keeps_order_and_drops_a_slow_peer },
+    { "waker_keeps_a_wake_until_waited_for", waker_keeps_a_wake_until_waited_for },
     { nullptr, nullptr },
 };

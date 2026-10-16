@@ -26,10 +26,11 @@ struct Node {
     // text is a scalar as written, so a number keeps its digits; for a
     // string it is the decoded value.
     String text;
-    // line is the 1-based line where yaml_parse found the node, and 0 for a
-    // node made in code or by json_parse. offset and length are the bytes it
-    // spans in the parsed text, inside the quotes of a quoted scalar, so a
-    // value can be rewritten in place.
+    // line is the 1-based line where yaml_parse found the node, for a block
+    // mapping or sequence the line of its first key or item, and 0 for a node
+    // made in code or by json_parse. offset and length are the bytes it spans
+    // in the parsed text, inside the quotes of a quoted scalar, so a value
+    // can be rewritten in place; a block mapping or sequence has none.
     size_t line;
     size_t offset;
     size_t length;

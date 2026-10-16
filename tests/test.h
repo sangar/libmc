@@ -50,3 +50,4 @@ extern const AbortCase ABORT_CASES[];
 
 // Abort cases that live with the tests that run them.
 void terminal_round_trip(void);
+void signal_watch_round_trip(void);
