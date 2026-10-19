@@ -1498,6 +1498,23 @@ static void *reap_child(void *argument)
     return nullptr;
 }
 
+// reap_in_background waits for child on a thread of its own, so it does not
+// linger as a zombie. The thread blocks every signal: it outlives the call,
+// and a signal the kernel handed to it would never reach a thread the program
+// started later to take that signal with sigwait.
+static void reap_in_background(pid_t child)
+{
+    sigset_t all;
+    sigfillset(&all);
+    sigset_t previous;
+    pthread_sigmask(SIG_BLOCK, &all, &previous);
+    Thread reaper;
+    if (thread_start(&reaper, reap_child, (void *)(intptr_t)child, nullptr) == ERR_OK) {
+        thread_detach(&reaper);
+    }
+    pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+}
+
 Error process_open_default(String path, Err *err)
 {
     CPath cpath;
@@ -1528,11 +1545,7 @@ Error process_open_default(String path, Err *err)
     if (rc != 0) {
         return err_set(err, rc == ENOENT ? ERR_NOT_FOUND : ERR_PLATFORM, "start %s: %s", opener, strerror(rc));
     }
-    // A thread waits for the opener so it does not linger as a zombie.
-    Thread reaper;
-    if (thread_start(&reaper, reap_child, (void *)(intptr_t)pid, nullptr) == ERR_OK) {
-        thread_detach(&reaper);
-    }
+    reap_in_background(pid);
     return ERR_OK;
 }
 
@@ -1602,10 +1615,7 @@ Error process_spawn_detached(Arena *scratch, StringList argv, String output_path
     if (rc != 0) {
         return spawn_failed(err, rc, items[0]);
     }
-    Thread reaper;
-    if (thread_start(&reaper, reap_child, (void *)(intptr_t)child, nullptr) == ERR_OK) {
-        thread_detach(&reaper);
-    }
+    reap_in_background(child);
     *pid = (int)child;
     return ERR_OK;
 }
