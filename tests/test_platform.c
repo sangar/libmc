@@ -650,6 +650,42 @@ static void signal_watch_calls_back(Test *test)
     test_check_aborts(test, "signal_watch_round_trip", "a stop signal reaches the callback, and the watch stops");
 }
 
+// reaper_round_trip starts a detached child, whose reaper thread outlives the
+// call, then watches the stop signals, whose watch takes them with sigwait on
+// a later thread, and sends itself a stop. It aborts once the watch heard it;
+// a reaper that took the signal instead would end the process.
+void reaper_round_trip(void)
+{
+    Arena *a = arena_create(0);
+    const char *const sleeper[] = { "sleep", "5" };
+    int pid;
+    if (process_spawn_detached(a, strlist_of(a, countof(sleeper), sleeper), S(""), &pid, nullptr) != ERR_OK) {
+        return;
+    }
+    signals_block();
+    atomic_int heard;
+    atomic_init(&heard, 0);
+    SignalWatch *watch;
+    if (signal_watch_start(on_signal, &heard, &watch, nullptr) != ERR_OK) {
+        return;
+    }
+    Error sent = process_signal(process_id(), SIGNAL_STOP, nullptr);
+    unused(sent);
+    for (int i = 0; i < 200 && atomic_load(&heard) == 0; i++) {
+        clock_sleep_ms(10);
+    }
+    signal_watch_stop(watch);
+    sent = process_signal(pid, SIGNAL_STOP, nullptr);
+    if (atomic_load(&heard) == 1) {
+        abort();
+    }
+}
+
+static void detached_processes_leave_signals_to_the_program(Test *test)
+{
+    test_check_aborts(test, "reaper_round_trip", "a signal goes to the thread that waits for it, not the reaper");
+}
+
 static void frames_cross_a_socket_whole(Test *test)
 {
     Arena *a = test->arena;
@@ -705,6 +741,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
     { "file_lock_keeps_out_a_second_holder", file_lock_keeps_out_a_second_holder },
     { "detached_processes_lead_a_session_and_write_to_a_file", detached_processes_lead_a_session_and_write_to_a_file },
+    { "detached_processes_leave_signals_to_the_program", detached_processes_leave_signals_to_the_program },
     { "file_try_lock_does_not_wait", file_try_lock_does_not_wait },
     { "file_find_upward_climbs", file_find_upward_climbs },
     { "dir_runtime_is_private", dir_runtime_is_private },
