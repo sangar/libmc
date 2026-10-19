@@ -650,20 +650,10 @@ static void signal_watch_calls_back(Test *test)
     test_check_aborts(test, "signal_watch_round_trip", "a stop signal reaches the callback, and the watch stops");
 }
 
-static void *wait_for_user_signal(void *argument)
-{
-    sigset_t user;
-    sigemptyset(&user);
-    sigaddset(&user, SIGUSR1);
-    int number;
-    atomic_store((atomic_bool *)argument, sigwait(&user, &number) == 0);
-    return nullptr;
-}
-
 // reaper_round_trip starts a detached child, whose reaper thread outlives the
-// call, then sends itself SIGUSR1 for a later thread that waits for it with
-// sigwait, as a terminal's resize thread does. It aborts once the signal
-// reached the wait; a reaper that took it instead would end the process.
+// call, then watches the stop signals, whose watch takes them with sigwait on
+// a later thread, and sends itself a stop. It aborts once the watch heard it;
+// a reaper that took the signal instead would end the process.
 void reaper_round_trip(void)
 {
     Arena *a = arena_create(0);
@@ -672,20 +662,21 @@ void reaper_round_trip(void)
     if (process_spawn_detached(a, strlist_of(a, countof(sleeper), sleeper), S(""), &pid, nullptr) != ERR_OK) {
         return;
     }
-    sigset_t user;
-    sigemptyset(&user);
-    sigaddset(&user, SIGUSR1);
-    pthread_sigmask(SIG_BLOCK, &user, nullptr);
-    atomic_bool waited;
-    atomic_init(&waited, false);
-    Thread waiter;
-    if (thread_start(&waiter, wait_for_user_signal, &waited, nullptr) != ERR_OK) {
+    signals_block();
+    atomic_int heard;
+    atomic_init(&heard, 0);
+    SignalWatch *watch;
+    if (signal_watch_start(on_signal, &heard, &watch, nullptr) != ERR_OK) {
         return;
     }
-    kill(process_id(), SIGUSR1);
-    thread_join(&waiter);
-    kill(pid, SIGTERM);
-    if (atomic_load(&waited)) {
+    Error sent = process_signal(process_id(), SIGNAL_STOP, nullptr);
+    unused(sent);
+    for (int i = 0; i < 200 && atomic_load(&heard) == 0; i++) {
+        clock_sleep_ms(10);
+    }
+    signal_watch_stop(watch);
+    sent = process_signal(pid, SIGNAL_STOP, nullptr);
+    if (atomic_load(&heard) == 1) {
         abort();
     }
 }
