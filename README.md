@@ -149,6 +149,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting, on yyjson |
 | | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
 | | `mc/encoding/dotenv.h` | `.env` files into `NAME=value` entries, with quotes and comments and no expansion |
+| | `mc/encoding/csv.h` | RFC 4180 records read one at a time: quoted fields with line breaks and `""`, CRLF or LF, a byte order mark; fields are views into the text |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
 

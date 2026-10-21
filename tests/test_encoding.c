@@ -3,6 +3,7 @@
 #include <locale.h>
 #include <math.h>
 
+#include "mc/encoding/csv.h"
 #include "mc/encoding/dotenv.h"
 #include "mc/encoding/json.h"
 #include "mc/encoding/yaml.h"
@@ -311,6 +312,64 @@ static void dotenv_reads_names_and_values(Test *test)
     test_check_str(test, S(err.msg), S("dotenv: line 2: expected NAME=value"), "says which line");
 }
 
+// read_all reads every record of text; each row's fields are joined with | and rows with ;.
+static String read_all(Test *test, const char *text, Error *e)
+{
+    CsvReader reader = csv_reader_create(S(text));
+    CsvRow row = { 0 };
+    StringBuilder out = str_builder_create(test->arena, 64);
+    bool found = false;
+    while ((*e = csv_read_row(&reader, test->arena, &row, &found, nullptr)) == ERR_OK && found) {
+        for (size_t i = 0; i < row.count; i++) {
+            str_builder_append(&out, i == 0 ? S("") : S("|"));
+            str_builder_append(&out, row.fields[i]);
+        }
+        str_builder_append(&out, S(";"));
+    }
+    return str_builder_finish(&out);
+}
+
+static void csv_reads_rfc_4180_records(Test *test)
+{
+    Error e = ERR_OK;
+    test_check_str(test, read_all(test, "a,b\r\nc,d\r\n", &e), S("a|b;c|d;"), "CRLF records");
+    test_check_str(test, read_all(test, "a,b\nc,d", &e), S("a|b;c|d;"), "LF records and no final line break");
+    test_check_str(test, read_all(test, "\"x, y\",\"say \"\"hi\"\"\"\n", &e), S("x, y|say \"hi\";"),
+                   "a comma and doubled quotes inside quotes");
+    test_check_str(test, read_all(test, "\"line one\nline two\",z\n", &e), S("line one\nline two|z;"),
+                   "a line break inside quotes");
+    test_check_str(test, read_all(test, "a,,\n,\n", &e), S("a||;|;"), "empty fields");
+    test_check_str(test, read_all(test, "\xEF\xBB\xBF" "Book Id,Title\n", &e), S("Book Id|Title;"),
+                   "a byte order mark is skipped");
+    test_check_str(test, read_all(test, "=\"0143127748\",\"\"\n", &e), S("=\"0143127748\"|;"),
+                   "a quote inside an unquoted field is kept, as Goodreads writes ISBNs");
+    test_check(test, e == ERR_OK, "reads them all");
+}
+
+static void csv_keeps_plain_fields_as_views(Test *test)
+{
+    const char *text = "plain,\"quoted\"\n";
+    CsvReader reader = csv_reader_create(S(text));
+    CsvRow row = { 0 };
+    bool found = false;
+    test_check(test, csv_read_row(&reader, test->arena, &row, &found, nullptr) == ERR_OK && found, "reads");
+    test_check(test, row.fields[0].data == text && row.fields[1].data == text + 7, "both point into the text");
+}
+
+static void csv_rejects_malformed_quotes(Test *test)
+{
+    Err err = { 0 };
+    CsvReader reader = csv_reader_create(S("ok\n\"never closed\n"));
+    CsvRow row = { 0 };
+    bool found = false;
+    test_check(test, csv_read_row(&reader, test->arena, &row, &found, &err) == ERR_OK, "the first record");
+    test_check(test, csv_read_row(&reader, test->arena, &row, &found, &err) == ERR_PARSE, "an unclosed quote");
+    test_check(test, str_contains(S(err.msg), S("line 2")), "names its line");
+    Error e = ERR_OK;
+    read_all(test, "\"closed\"junk,x\n", &e);
+    test_check(test, e == ERR_PARSE, "text after a closing quote");
+}
+
 const TestCase ENCODING_TESTS[] = {
     { "json_parses_every_kind", json_parses_every_kind },
     { "json_decodes_strings", json_decodes_strings },
@@ -324,5 +383,8 @@ const TestCase ENCODING_TESTS[] = {
     { "yaml_nodes_know_where_they_are_in_the_source", yaml_nodes_know_where_they_are_in_the_source },
     { "yaml_rejects_malformed_input", yaml_rejects_malformed_input },
     { "dotenv_reads_names_and_values", dotenv_reads_names_and_values },
+    { "csv_reads_rfc_4180_records", csv_reads_rfc_4180_records },
+    { "csv_keeps_plain_fields_as_views", csv_keeps_plain_fields_as_views },
+    { "csv_rejects_malformed_quotes", csv_rejects_malformed_quotes },
     { nullptr, nullptr },
 };
