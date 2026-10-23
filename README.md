@@ -7,7 +7,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The two vendored libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON and [cyaml](https://github.com/andrewmd5/cyaml) for YAML, are pinned in `deps.lock` and build into `libmc.a`.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The three vendored libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML and [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, are pinned in `deps.lock` and build into `libmc.a`.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services, the terminal, pseudo-terminals and system statistics.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
@@ -98,13 +98,13 @@ The library exports plain C functions and fixed-layout structs, so any language 
 - **Out of memory aborts.** When an arena cannot get memory from the system, the process aborts. No error is returned.
 - **Arenas are single-threaded.** Give each thread its own arena.
 - **Unprefixed names.** Symbols such as `S`, `str_*` and `file_*` have no library prefix and can clash with other C libraries in the same binary.
-- **Vendored symbols.** `libmc.a` also contains yyjson's `yyjson_*` and cyaml's `cyaml_*` symbols. A project that uses yyjson directly includes `deps/yyjson/yyjson.h` from libmc instead of linking a second copy.
+- **Vendored symbols.** `libmc.a` also contains yyjson's `yyjson_*`, cyaml's `cyaml_*` and utf8proc's `utf8proc_*` symbols. A project that uses yyjson directly includes `deps/yyjson/yyjson.h` from libmc instead of linking a second copy.
 - **No ABI stability promise.** Rebuild the library together with the code that uses it.
 
 ## Conventions
 
 - **Strings.** A `String` is a view and owns nothing. Functions that take an `Arena` return NUL-terminated strings allocated in it.
-- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`. yyjson allocates from a scratch arena that `json_parse` frees before it returns.
+- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`. `src/text/unicode.c` calls only the utf8proc functions that write into a buffer it passes, never the ones that allocate. yyjson allocates from a scratch arena that `json_parse` frees before it returns.
 - **Errors.** A function that can fail for reasons outside the caller's control, such as I/O, the network or a child process, returns `Error` and is marked `[[nodiscard]]`. Results come back through out-parameters. The last parameter is an optional `Err *` that receives a human-readable message; pass `nullptr` to ignore it. Parsers and lookups, for which "no" is an ordinary answer, return `bool` instead. Running out of memory, an allocation size that overflows, or a failed mutex or condition variable call aborts.
 - **Ownership is in the signature.** A function that allocates takes an `Arena *`. A function without one returns a view or nothing.
 - **No global state.** The exceptions are `env_set`, which changes the process environment, and the C locale that `float_parse` and `float_format` create once and share. `process_run` blocks `SIGPIPE` only in the calling thread while it feeds the child, and discards any `SIGPIPE` that leaves pending.
@@ -122,6 +122,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/core/arena.h` | Block arena, mark/release, `arena_grow` for dynamic arrays |
 | text | `mc/text/str.h` | `String`, `StringList`, `StringBuilder` |
 | | `mc/text/utf8.h` | UTF-8 decode, encode, validate and count |
+| | `mc/text/unicode.h` | NFC normalization, Unicode upper and lower case, case-insensitive equality, Danish and Norwegian sort order, on utf8proc |
 | | `mc/text/glob.h` | Glob matching with `**` and character classes |
 | | `mc/text/path.h` | Lexical path handling: join, clean, base, dir, ext, relative |
 | | `mc/text/fmt.h` | Go-style durations, RFC 3339 timestamps, thousands separators, byte sizes |

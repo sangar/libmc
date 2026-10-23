@@ -48,7 +48,7 @@ static Header *signed_headers(Arena *arena, SigV4Request request, size_t *count)
         String name;
         String value;
         str_cut(request.headers.items[i], ':', &name, &value);
-        headers[i + 2] = (Header){ str_lower_ascii(arena, str_trim(name)), canonical_value(arena, value) };
+        headers[i + 2] = (Header){ str_lower_ascii(arena, str_trim(name)), canonical_value(arena, value) }; // modern-c: allow ascii-text
     }
     sort_stable(arena, headers, *count, sizeof *headers, compare_names, nullptr);
     return merge_repeated_names(arena, headers, count);
