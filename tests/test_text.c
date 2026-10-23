@@ -6,6 +6,7 @@
 #include "mc/crypto/sha256.h"
 #include "mc/crypto/sigv4.h"
 #include "mc/text/table.h"
+#include "mc/text/unicode.h"
 #include "mc/container/sort.h"
 #include "mc/text/utf8.h"
 
@@ -45,6 +46,46 @@ static void utf8_converts_latin1(Test *test)
     test_check(test, utf8_is_valid(converted) && utf8_count(converted) == 256 && converted.len == 384,
                "every byte becomes one code point");
     test_check(test, converted.data[converted.len] == '\0', "the result is NUL-terminated");
+}
+
+static void unicode_normalizes_and_cases(Test *test)
+{
+    Arena *a = test->arena;
+    String decomposed = S("bla\xCC\x8A" "b\xC3\xA6r");
+    test_check(test, !str_equal(decomposed, S("blåbær")), "decomposed å differs bytewise");
+    test_check_str(test, unicode_nfc(a, decomposed), S("blåbær"), "nfc composes a and a ring above into å");
+    test_check_str(test, unicode_nfc(a, S("blåbær")), S("blåbær"), "nfc leaves composed text alone");
+    test_check(test, unicode_nfc(a, S("")).len == 0, "nfc of empty text is empty");
+    test_check(test, unicode_equal_ignore_case(unicode_nfc(a, S("A\xCC\x8Ar")), S("år")),
+               "decomposed Å equals å once normalized");
+
+    test_check_str(test, unicode_lower(a, S("BLÅBÆR ØL")), S("blåbær øl"), "lower maps ÆØÅ");
+    test_check_str(test, unicode_upper(a, S("blåbær øl")), S("BLÅBÆR ØL"), "upper maps æøå");
+    test_check_str(test, unicode_upper(a, S("ß")), S("ẞ"), "upper maps one code point to one");
+    test_check(test, unicode_equal_ignore_case(S("ÆØÅ"), S("æøå")), "ÆØÅ equals æøå ignoring case");
+    test_check(test, !unicode_equal_ignore_case(S("æøå"), S("æø")), "a longer string is not equal");
+
+    String invalid = { "a\xE5z", 3 };
+    test_check_str(test, unicode_lower(a, invalid), S("a\xEF\xBF\xBDz"), "a malformed byte becomes U+FFFD");
+    test_check_str(test, unicode_nfc(a, invalid), S("a\xEF\xBF\xBDz"), "nfc replaces malformed bytes too");
+}
+
+static void unicode_sorts_norwegian(Test *test)
+{
+    Arena *a = test->arena;
+    StringList words = strlist_of(a, 5, (const char *const[]){ "å", "z", "æ", "ø", "a" });
+    unicode_sort_norwegian(&words);
+    test_check_str(test, str_join(a, words, S(" ")), S("a z æ ø å"), "æ, ø and å follow z");
+
+    StringList mixed = strlist_of(a, 6, (const char *const[]){ "ål", "Øl", "zebra", "Ærlig", "apple", "Apple" });
+    unicode_sort_norwegian(&mixed);
+    test_check_str(test, str_join(a, mixed, S(" ")), S("Apple apple zebra Ærlig Øl ål"),
+                   "sorting ignores case, then puts upper case first");
+    test_check(test, unicode_compare_norwegian(S("Å"), S("a")) < 0, "upper case sorts before lower case");
+    test_check(test, unicode_compare_norwegian(S("Z"), S("Æ")) < 0 && unicode_compare_norwegian(S("Å"), S("[")) < 0,
+               "Æ, Ø and Å sit between Z and the next code point");
+    test_check(test, unicode_compare_norwegian_ignore_case(S("ÆØÅ"), S("æøå")) == 0, "ignore case folds ÆØÅ");
+    test_check(test, unicode_compare_norwegian(S("ø"), S("øl")) < 0, "a shorter prefix sorts first");
 }
 
 static void glob_matches_paths(Test *test)
@@ -305,6 +346,8 @@ static void sigv4_signs_like_aws(Test *test)
 const TestCase TEXT_TESTS[] = {
     { "utf8_roundtrip_and_validation", utf8_roundtrip_and_validation },
     { "utf8_converts_latin1", utf8_converts_latin1 },
+    { "unicode_normalizes_and_cases", unicode_normalizes_and_cases },
+    { "unicode_sorts_norwegian", unicode_sorts_norwegian },
     { "glob_matches_paths", glob_matches_paths },
     { "path_lexical_operations", path_lexical_operations },
     { "fmt_durations", fmt_durations },

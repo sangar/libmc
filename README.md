@@ -104,7 +104,7 @@ The library exports plain C functions and fixed-layout structs, so any language 
 ## Conventions
 
 - **Strings.** A `String` is a view and owns nothing. Functions that take an `Arena` return NUL-terminated strings allocated in it.
-- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`. yyjson allocates from a scratch arena that `json_parse` frees before it returns.
+- **Memory.** Arena memory comes back zeroed. Use `arena_mark` and `arena_release` for temporary allocations. Only `src/core/arena.c` calls `malloc`, apart from cyaml, whose allocations stay inside `src/encoding/yaml.c`. `src/text/unicode.c` calls only the utf8proc functions that write into a buffer it passes, never the ones that allocate. yyjson allocates from a scratch arena that `json_parse` frees before it returns.
 - **Errors.** A function that can fail for reasons outside the caller's control, such as I/O, the network or a child process, returns `Error` and is marked `[[nodiscard]]`. Results come back through out-parameters. The last parameter is an optional `Err *` that receives a human-readable message; pass `nullptr` to ignore it. Parsers and lookups, for which "no" is an ordinary answer, return `bool` instead. Running out of memory, an allocation size that overflows, or a failed mutex or condition variable call aborts.
 - **Ownership is in the signature.** A function that allocates takes an `Arena *`. A function without one returns a view or nothing.
 - **No global state.** The exceptions are `env_set`, which changes the process environment, and the C locale that `float_parse` and `float_format` create once and share. `process_run` blocks `SIGPIPE` only in the calling thread while it feeds the child, and discards any `SIGPIPE` that leaves pending.
@@ -122,6 +122,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/core/arena.h` | Block arena, mark/release, `arena_grow` for dynamic arrays |
 | text | `mc/text/str.h` | `String`, `StringList`, `StringBuilder` |
 | | `mc/text/utf8.h` | UTF-8 decode, encode, validate and count |
+| | `mc/text/unicode.h` | NFC normalization, Unicode upper and lower case, case-insensitive equality, Danish and Norwegian sort order, on utf8proc |
 | | `mc/text/glob.h` | Glob matching with `**` and character classes |
 | | `mc/text/path.h` | Lexical path handling: join, clean, base, dir, ext, relative |
 | | `mc/text/fmt.h` | Go-style durations, RFC 3339 timestamps, thousands separators, byte sizes |
