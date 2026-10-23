@@ -40,7 +40,7 @@ static void str_cut_trim_case(Test *test)
     test_check_str(test, str_trim(tail), S("text/html"), "trim removes surrounding space");
     test_check(test, !str_cut(S("nosep"), ':', &head, &tail) && tail.len == 0, "cut without a separator");
     test_check(test, str_equal_ignore_case(S("TEXT/html"), S("text/HTML")), "ascii case-insensitive compare");
-    test_check_str(test, str_lower_ascii(test->arena, S("Blå ÆØÅ")), S("blå ÆØÅ"),
+    test_check_str(test, str_lower_ascii(test->arena, S("Blå ÆØÅ")), S("blå ÆØÅ"), // modern-c: allow ascii-text
                    "lower_ascii leaves non-ascii bytes alone");
 }
 
