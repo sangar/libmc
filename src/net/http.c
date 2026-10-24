@@ -3,8 +3,8 @@
 #include <curl/curl.h>
 #include <string.h>
 
-#include "cacert.h"
 #include "mc/platform/platform.h"
+#include "roots.h"
 
 enum {
     DEFAULT_CONNECT_TIMEOUT_MS = 10 * 1000,
@@ -13,14 +13,6 @@ enum {
     DEFAULT_MAX_REDIRECTS = 5,
     INITIAL_BODY_CAPACITY = 4096,
     INITIAL_HEADER_CAPACITY = 16,
-};
-
-// The systems' bundles of trusted roots, in the order they are looked for:
-// Debian and Ubuntu, Fedora and RHEL, then macOS and Alpine.
-static const char *const CA_FILES[] = {
-    "/etc/ssl/certs/ca-certificates.crt",
-    "/etc/pki/tls/certs/ca-bundle.crt",
-    "/etc/ssl/cert.pem",
 };
 
 struct HttpClient {
@@ -33,16 +25,6 @@ struct HttpClient {
     const char *user_agent;
 };
 
-String http_default_ca_file(void)
-{
-    for (size_t i = 0; i < countof(CA_FILES); i++) {
-        if (file_exists(S(CA_FILES[i]))) {
-            return S(CA_FILES[i]);
-        }
-    }
-    return (String){ 0 };
-}
-
 static HttpClientConfig with_defaults(HttpClientConfig config)
 {
     config.connect_timeout_ms = config.connect_timeout_ms > 0 ? config.connect_timeout_ms : DEFAULT_CONNECT_TIMEOUT_MS;
@@ -54,7 +36,7 @@ static HttpClientConfig with_defaults(HttpClientConfig config)
 
 Error http_client_create(const HttpClientConfig *config, HttpClient **client, Err *err)
 {
-    String ca_file = config->ca_file.len > 0 ? config->ca_file : http_default_ca_file();
+    String ca_file = roots_file(config->ca_file);
     if (ca_file.len > 0 && !file_exists(ca_file)) {
         return err_set(err, ERR_NOT_FOUND, "http: no bundle of trusted roots at %.*s",
                        (int)ca_file.len, ca_file.data);
@@ -229,12 +211,7 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
     const char *protocols = client->config.allow_plain_http ? "http,https" : "https";
     curl_easy_setopt(curl, CURLOPT_URL, hop_request->url);
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, protocols);
-    if (client->ca_file != nullptr) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, client->ca_file);
-    } else {
-        struct curl_blob roots = { .data = (void *)CACERT_PEM, .len = CACERT_PEM_SIZE, .flags = CURL_BLOB_NOCOPY };
-        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &roots);
-    }
+    roots_set(curl, client->ca_file);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)client->config.connect_timeout_ms);
