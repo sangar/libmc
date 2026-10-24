@@ -6,7 +6,9 @@
 #include "mc/encoding/csv.h"
 #include "mc/encoding/dotenv.h"
 #include "mc/encoding/json.h"
+#include "mc/encoding/markdown.h"
 #include "mc/encoding/yaml.h"
+#include "mc/platform/platform.h"
 
 static Node *parse(Test *test, const char *text)
 {
@@ -370,6 +372,102 @@ static void csv_rejects_malformed_quotes(Test *test)
     test_check(test, e == ERR_PARSE, "text after a closing quote");
 }
 
+static String render(Test *test, const char *markdown, MarkdownOptions options)
+{
+    String html = { 0 };
+    Err err = { 0 };
+    test_check(test, markdown_to_html(test->arena, S(markdown), options, &html, &err) == ERR_OK, err.msg);
+    return html;
+}
+
+// GitHub's autolinks link the bare URLs and the address in these examples, which CommonMark leaves as text.
+static const size_t GITHUB_AUTOLINK_EXAMPLES[] = { 608, 611, 612 };
+
+static bool is_github_autolink_example(size_t example)
+{
+    for (size_t i = 0; i < countof(GITHUB_AUTOLINK_EXAMPLES); i++) {
+        if (GITHUB_AUTOLINK_EXAMPLES[i] == example) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The CommonMark spec's examples follow a line of 32 backticks and " example":
+// the Markdown, a line ".", the HTML, and the backticks again. A → in them
+// stands for a tab. They hold raw HTML, so they render with allow_html.
+static void markdown_renders_the_commonmark_spec_examples(Test *test)
+{
+    String spec = { 0 };
+    test_check(test, file_read_all(test->arena, S("deps/md4c/test/spec.txt"), &spec, nullptr) == ERR_OK, "reads the spec");
+    StringList lines = strlist_from_lines(test->arena, str_replace_all(test->arena, spec, S("→"), S("\t")));
+    String fence = S("````````````````````````````````");
+    String opening = str_concat(test->arena, fence, S(" example"));
+    size_t examples = 0;
+    for (size_t i = 0; i < lines.count; i++) {
+        if (!str_equal(lines.items[i], opening)) {
+            continue;
+        }
+        StringBuilder markdown = str_builder_create(test->arena, 256);
+        for (i++; i < lines.count && !str_equal(lines.items[i], S(".")); i++) {
+            str_builder_append(&markdown, lines.items[i]);
+            str_builder_append_char(&markdown, '\n');
+        }
+        StringBuilder expected = str_builder_create(test->arena, 256);
+        for (i++; i < lines.count && !str_equal(lines.items[i], fence); i++) {
+            str_builder_append(&expected, lines.items[i]);
+            str_builder_append_char(&expected, '\n');
+        }
+        examples++;
+        String html = render(test, str_builder_finish(&markdown).data, (MarkdownOptions){ .allow_html = true });
+        const char *what = str_format(test->arena, "example %zu", examples).data;
+        if (is_github_autolink_example(examples)) {
+            test_check(test, str_contains(html, S("<a href=\"")), what);
+        } else {
+            test_check_str(test, html, str_builder_finish(&expected), what);
+        }
+    }
+    test_check(test, examples == 652, "finds all 652 examples");
+}
+
+static void markdown_renders_github_extensions(Test *test)
+{
+    MarkdownOptions options = { 0 };
+    test_check_str(test, render(test, "| a | b |\n|:--|--:|\n| 1 | 2 |\n", options),
+                   S("<table>\n<thead>\n<tr>\n<th align=\"left\">a</th>\n<th align=\"right\">b</th>\n</tr>\n</thead>\n"
+                     "<tbody>\n<tr>\n<td align=\"left\">1</td>\n<td align=\"right\">2</td>\n</tr>\n</tbody>\n</table>\n"),
+                   "a table with aligned columns");
+    test_check_str(test, render(test, "- [ ] todo\n- [x] done\n", options),
+                   S("<ul>\n<li><input disabled=\"\" type=\"checkbox\"> todo</li>\n"
+                     "<li><input checked=\"\" disabled=\"\" type=\"checkbox\"> done</li>\n</ul>\n"),
+                   "a task list");
+    test_check_str(test, render(test, "~~gone~~", options), S("<p><del>gone</del></p>\n"), "strikethrough");
+    test_check_str(test, render(test, "see www.example.com, https://example.org/a or me@example.com", options),
+                   S("<p>see <a href=\"http://www.example.com\">www.example.com</a>, <a href=\"https://example.org/a\">"
+                     "https://example.org/a</a> or <a href=\"mailto:me@example.com\">me@example.com</a></p>\n"),
+                   "links without angle brackets");
+    test_check_str(test, render(test, "\xEF\xBB\xBF# Title", options), S("<h1>Title</h1>\n"), "a byte order mark is skipped");
+}
+
+static void markdown_keeps_html_and_scripts_out(Test *test)
+{
+    MarkdownOptions options = { 0 };
+    test_check_str(test, render(test, "<script>alert(1)</script>", options),
+                   S("<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>\n"), "a raw HTML block is text");
+    test_check_str(test, render(test, "a <b onclick=\"go()\">b</b>", options),
+                   S("<p>a &lt;b onclick=&quot;go()&quot;&gt;b&lt;/b&gt;</p>\n"), "inline raw HTML is text");
+    test_check_str(test, render(test, "[a](javascript:alert(1))", options), S("<p><a href=\"\">a</a></p>\n"),
+                   "a javascript: link");
+    test_check_str(test, render(test, "[a](JaVaScRiPt&#x3A;alert(1))", options), S("<p><a href=\"\">a</a></p>\n"),
+                   "a javascript: link in mixed case behind an entity");
+    test_check_str(test, render(test, "![a](data:text/html;base64,PHNjcmlwdD4=)", options),
+                   S("<p><img src=\"\" alt=\"a\" /></p>\n"), "a data: URL that is no image");
+    test_check_str(test, render(test, "![a](data:image/png;base64,iVBO)", options),
+                   S("<p><img src=\"data:image/png;base64,iVBO\" alt=\"a\" /></p>\n"), "a PNG data: image");
+    test_check_str(test, render(test, "a <b>b</b>\n\n[a](javascript:go())", (MarkdownOptions){ .allow_html = true }),
+                   S("<p>a <b>b</b></p>\n<p><a href=\"javascript:go()\">a</a></p>\n"), "allow_html passes both");
+}
+
 const TestCase ENCODING_TESTS[] = {
     { "json_parses_every_kind", json_parses_every_kind },
     { "json_decodes_strings", json_decodes_strings },
@@ -386,5 +484,8 @@ const TestCase ENCODING_TESTS[] = {
     { "csv_reads_rfc_4180_records", csv_reads_rfc_4180_records },
     { "csv_keeps_plain_fields_as_views", csv_keeps_plain_fields_as_views },
     { "csv_rejects_malformed_quotes", csv_rejects_malformed_quotes },
+    { "markdown_renders_the_commonmark_spec_examples", markdown_renders_the_commonmark_spec_examples },
+    { "markdown_renders_github_extensions", markdown_renders_github_extensions },
+    { "markdown_keeps_html_and_scripts_out", markdown_keeps_html_and_scripts_out },
     { nullptr, nullptr },
 };

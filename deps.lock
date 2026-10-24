@@ -8,3 +8,5 @@ utf8proc 2.12.0 https://github.com/sangar/libmc/releases/download/deps-utf8proc-
 nghttp2 1.70.0 https://github.com/sangar/libmc/releases/download/deps-nghttp2-1.70.0/nghttp2-1.70.0.tar.gz sha256:add70515c0c9b114a90a70a4450719edafad3bc81efd1365c1383274e6db58a0
 zlib 1.3.2 https://github.com/sangar/libmc/releases/download/deps-zlib-1.3.2/zlib-1.3.2.tar.gz sha256:d29a906ad18cf40efb4556b9231cdd69e0f20a10b188ba060b27600791ddd212
 cacert 2026-10-20 https://github.com/sangar/libmc/releases/download/deps-cacert-2026-10-20/cacert-2026-10-20.tar.gz sha256:e5f6ab3ed143038ef7da77517b9943a0dfcb625cf9b27052a4da22673e607cd3
+# md4c: test/spec.txt holds the CommonMark spec's examples, which tests/test_encoding.c renders.
+md4c 0.6.0 https://github.com/sangar/libmc/releases/download/deps-md4c-0.6.0/md4c-0.6.0.tar.gz sha256:7f4bcf812b871857194b756b7ef82d5b8cdbc6886b24ed216f572f1aba9f6c72
