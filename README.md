@@ -7,7 +7,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP, with [Mozilla's trusted roots](https://curl.se/docs/caextract.html) for systems that have none, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, [md4c](https://github.com/mity/md4c) for Markdown and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP, with [Mozilla's trusted roots](https://curl.se/docs/caextract.html) for systems that have none, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services, the terminal, pseudo-terminals and system statistics.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
@@ -153,6 +153,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting, on yyjson |
 | | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
 | | `mc/encoding/dotenv.h` | `.env` files into `NAME=value` entries, with quotes and comments and no expansion |
+| | `mc/encoding/markdown.h` | CommonMark with GitHub's tables, task lists, strikethrough and autolinks to HTML, on md4c; raw HTML and script links shown as text unless allowed |
 | | `mc/encoding/csv.h` | RFC 4180 records read one at a time: quoted fields with line breaks and `""`, CRLF or LF, a byte order mark; fields are views into the text |
 | net | `mc/net/http.h` | HTTPS requests on libcurl: HTTP/2 where the server offers it, gzip and deflate decoded, allowed hosts checked on every redirect, limits on time and size, Mozilla's trusted roots where the system has none |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
