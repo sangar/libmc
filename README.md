@@ -7,7 +7,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. The three vendored libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML and [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, are pinned in `deps.lock` and build into `libmc.a`.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services, the terminal, pseudo-terminals and system statistics.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
@@ -23,7 +23,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 
 Windows is not supported until `src/platform/` has a Windows implementation.
 
-Cross builds of the macOS library need no macOS SDK: `src/platform/watch_darwin.c` declares the few FSEvents functions it calls, and where the SDK is present the compiler checks those declarations against its headers.
+Cross builds of the macOS library need no macOS SDK: `src/platform/watch_darwin.c` declares the few FSEvents functions it calls, and where the SDK is present the compiler checks those declarations against its headers. `src/net/curl/macos/sdk/` does the same for the two SystemConfiguration calls curl makes; the build searches it after the SDK.
 
 ## Building
 
@@ -43,6 +43,9 @@ Then:
 | `./nob check` | Runs the `modern-c` contract checker, then the tests (see below) |
 | `./nob cross` | Release library for every platform: `out/<platform>/release/libmc.a` |
 | `./nob clean` | Removes `out/` |
+| `./nob hash <dir>` | Prints the `deps.lock` hash of a directory |
+
+The dependencies are not committed. Every build but `clean` checks `deps/<name>` against the hash in `deps.lock` and, when it is missing or differs, fetches it with `curl` from this repository's release `deps-<name>-<version>`, so the first build needs the network. To update one, put the new source in `deps/<name>`, trimmed to what the build compiles plus its license, update its line with the version, the new release URL and `./nob hash deps/<name>`, and publish it with `tools/publish-dep.sh`.
 
 Host builds use `$CC`, or `cc` when it is unset: `CC=gcc-14 ./nob test`. Each build records the compiler version and flags in `out/<build>/fingerprint` and recompiles everything when they change.
 
@@ -52,7 +55,7 @@ CI runs `./nob test` and `./nob release` with clang 18 and gcc 14 on Linux x86_6
 
 ## Usage
 
-Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching, and add `include/` to the include path. Alternatively, vendor the repository and compile `src/*/*.c` together with your own sources, plus `deps/*/*.c` as C11 with each `deps/<name>` on the include path. The vendored libraries are upstream's code, so they build without libmc's warning flags. Headers are included by area and module:
+Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching and `-framework SystemConfiguration -framework CoreFoundation` for HTTP, and add `include/` to the include path. To build it with your project, pin this repository as a dependency and run `./nob release` in it, which fetches libmc's own dependencies. Headers are included by area and module:
 
 ```c
 #include <stdio.h>
@@ -151,6 +154,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
 | | `mc/encoding/dotenv.h` | `.env` files into `NAME=value` entries, with quotes and comments and no expansion |
 | | `mc/encoding/csv.h` | RFC 4180 records read one at a time: quoted fields with line breaks and `""`, CRLF or LF, a byte order mark; fields are views into the text |
+| net | `mc/net/http.h` | HTTPS requests on libcurl: HTTP/2 where the server offers it, gzip and deflate decoded, allowed hosts checked on every redirect, limits on time and size |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
 
