@@ -9,6 +9,7 @@
 #include "nghttp2/nghttp2.h"
 #include "psa/crypto.h"
 
+#include "mc/net/ftp.h"
 #include "mc/net/http.h"
 #include "mc/net/smtp.h"
 #include "mc/platform/platform.h"
@@ -17,9 +18,9 @@
 // The tests run the clients against a server on 127.0.0.1 in a thread of this
 // process, over plain HTTP or TLS with the certificates in tests/fixtures/tls,
 // which a test CA there signed for localhost and 127.0.0.1. Over TLS it can
-// offer HTTP/2, which it answers through nghttp2, and it can take mail over
-// STARTTLS or TLS from the start. Set LIBMC_LIVE_TESTS=1 to
-// also call real hosts; where the system has no bundle of trusted roots, as in
+// offer HTTP/2, which it answers through nghttp2. It can also take mail, and
+// serve files over FTP, with TLS through STARTTLS or AUTH TLS or from the
+// start. Set LIBMC_LIVE_TESTS=1 to also call real hosts; where the system has no bundle of trusted roots, as in
 // a bare ubuntu:24.04, that checks the roots built into libmc.
 
 static const char CA_FILE[] = "tests/fixtures/tls/ca.pem";
@@ -187,12 +188,30 @@ typedef struct SmtpServer {
     String data;
 } SmtpServer;
 
+// FtpServer takes one session at a time: over TLS from the start when
+// implicit_tls, else in the clear, offering AUTH TLS when auth_tls. Data goes
+// over passive connections, through TLS after PROT P. It keeps files in arena
+// by their path from the root, where a session starts, and is slow to send
+// those with "slow" in their path.
+typedef struct FtpServer {
+    bool implicit_tls;
+    bool auth_tls;
+    Arena *arena;
+    StringList paths;
+    StringList contents;
+    String user;
+    bool user_over_tls;
+    bool data_in_clear;
+    size_t sessions;
+} FtpServer;
+
 typedef struct Server {
     int listener;
     String address;
     TlsServer *tls;
-    // smtp makes the server take mail instead of answering HTTP.
+    // smtp makes the server take mail instead of answering HTTP, and ftp serve files.
     SmtpServer *smtp;
+    FtpServer *ftp;
     atomic_bool stopping;
     Thread thread;
 } Server;
@@ -355,9 +374,9 @@ static bool read_line(LineReader *reader, Arena *arena, String *line)
     }
 }
 
-static void smtp_reply(Connection *connection, const char *reply)
+static void reply(Connection *connection, const char *line)
 {
-    connection_send(connection, S(reply));
+    connection_send(connection, S(line));
 }
 
 // read_data reads a message up to the line ".", undoing the dot stuffing.
@@ -382,53 +401,288 @@ static void serve_smtp(Server *server, int client)
     LineReader reader = { .connection = &connection };
     bool ready = !smtp->implicit_tls || tls_accept(server->tls, &connection, &tls);
     if (ready) {
-        smtp_reply(&connection, "220 libmc-test ESMTP\r\n");
+        reply(&connection, "220 libmc-test ESMTP\r\n");
     }
     String line = { 0 };
     while (ready && read_line(&reader, arena, &line)) {
         bool secure = connection.tls != nullptr;
         if (str_starts_with(line, S("EHLO "))) {
-            smtp_reply(&connection, "250-libmc-test\r\n");
+            reply(&connection, "250-libmc-test\r\n");
             if (secure) {
-                smtp_reply(&connection, "250-AUTH PLAIN\r\n");
+                reply(&connection, "250-AUTH PLAIN\r\n");
             } else if (smtp->starttls) {
-                smtp_reply(&connection, "250-STARTTLS\r\n");
+                reply(&connection, "250-STARTTLS\r\n");
             }
-            smtp_reply(&connection, "250 8BITMIME\r\n");
+            reply(&connection, "250 8BITMIME\r\n");
         } else if (str_equal(line, S("STARTTLS")) && !secure && smtp->starttls) {
-            smtp_reply(&connection, "220 2.0.0 ready\r\n");
+            reply(&connection, "220 2.0.0 ready\r\n");
             ready = tls_accept(server->tls, &connection, &tls);
             reader.start = reader.end = 0;
         } else if (str_starts_with(line, S("AUTH PLAIN")) && secure) {
             smtp->auth = str_trim(str_trim_prefix(line, S("AUTH PLAIN")));
             if (smtp->auth.len == 0) {
-                smtp_reply(&connection, "334 \r\n");
+                reply(&connection, "334 \r\n");
                 ready = read_line(&reader, arena, &smtp->auth);
             }
-            smtp_reply(&connection, "235 2.7.0 accepted\r\n");
+            reply(&connection, "235 2.7.0 accepted\r\n");
         } else if (str_starts_with(line, S("MAIL FROM:"))) {
             smtp->mail_from = str_trim_prefix(line, S("MAIL FROM:"));
-            smtp_reply(&connection, "250 2.1.0 ok\r\n");
+            reply(&connection, "250 2.1.0 ok\r\n");
         } else if (str_starts_with(line, S("RCPT TO:"))) {
             String recipient = str_trim_prefix(line, S("RCPT TO:"));
             if (str_contains(recipient, S("refused"))) {
-                smtp_reply(&connection, "550 5.1.1 no such user\r\n");
+                reply(&connection, "550 5.1.1 no such user\r\n");
             } else {
                 strlist_push(arena, &smtp->recipients, recipient);
-                smtp_reply(&connection, "250 2.1.5 ok\r\n");
+                reply(&connection, "250 2.1.5 ok\r\n");
             }
         } else if (str_equal(line, S("DATA"))) {
-            smtp_reply(&connection, "354 end with a line holding a dot\r\n");
+            reply(&connection, "354 end with a line holding a dot\r\n");
             smtp->data = read_data(&reader, arena);
-            smtp_reply(&connection, "250 2.0.0 queued\r\n");
+            reply(&connection, "250 2.0.0 queued\r\n");
         } else if (str_equal(line, S("QUIT"))) {
-            smtp_reply(&connection, "221 2.0.0 bye\r\n");
+            reply(&connection, "221 2.0.0 bye\r\n");
             break;
         } else {
-            smtp_reply(&connection, "502 5.5.2 not implemented\r\n");
+            reply(&connection, "502 5.5.2 not implemented\r\n");
         }
     }
     tls_end(&connection);
+    net_close(client);
+}
+
+// FtpSession is one control connection and the passive port it has open for data.
+typedef struct FtpSession {
+    Server *server;
+    FtpServer *ftp;
+    Connection control;
+    LineReader reader;
+    String directory;
+    int passive;
+    bool protect;
+} FtpSession;
+
+// ftp_path is name from directory, or from the root when it begins with /.
+static String ftp_path(Arena *arena, String directory, String name)
+{
+    if (str_starts_with(name, S("/"))) {
+        return str_trim_prefix(name, S("/"));
+    }
+    if (directory.len == 0) {
+        return name;
+    }
+    return str_format(arena, "%.*s/%.*s", (int)directory.len, directory.data, (int)name.len, name.data);
+}
+
+static bool ftp_find(const FtpServer *ftp, String path, size_t *index)
+{
+    for (size_t i = 0; i < ftp->paths.count; i++) {
+        if (str_equal(ftp->paths.items[i], path)) {
+            *index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ftp_store(FtpServer *ftp, String path, String contents)
+{
+    size_t index = 0;
+    if (ftp_find(ftp, path, &index)) {
+        ftp->contents.items[index] = contents;
+        return;
+    }
+    strlist_push(ftp->arena, &ftp->paths, path);
+    strlist_push(ftp->arena, &ftp->contents, contents);
+}
+
+static void ftp_listen(FtpSession *session)
+{
+    Arena *arena = session->ftp->arena;
+    String address = { 0 };
+    String host = { 0 };
+    String port = { 0 };
+    if (session->passive >= 0) {
+        net_close(session->passive);
+        session->passive = -1;
+    }
+    if (net_listen(S("127.0.0.1:0"), &session->passive, nullptr) != ERR_OK ||
+        net_local_address(arena, session->passive, &address, nullptr) != ERR_OK) {
+        reply(&session->control, "425 cannot open a data connection\r\n");
+        return;
+    }
+    str_cut(address, ':', &host, &port);
+    connection_send(&session->control,
+                    str_format(arena, "229 Entering Extended Passive Mode (|||%.*s|)\r\n", (int)port.len, port.data));
+}
+
+// ftp_open_data accepts the client's connection to the passive port, through TLS after PROT P.
+static bool ftp_open_data(FtpSession *session, Connection *data, mbedtls_ssl_context *tls)
+{
+    *data = (Connection){ .fd = -1 };
+    if (session->passive < 0 || !net_accept(session->passive, 5000, &data->fd)) {
+        return false;
+    }
+    (void)net_set_timeouts(data->fd, 5000, nullptr);
+    session->ftp->data_in_clear |= !session->protect;
+    return !session->protect || tls_accept(session->server->tls, data, tls);
+}
+
+// ftp_close_data waits for the client's close_notify after sending its own,
+// since curl ends a download that way and fails it when the connection is
+// reset, as it is when the server closes before that close_notify arrives.
+static void ftp_close_data(FtpSession *session, Connection *data)
+{
+    if (data->tls != nullptr) {
+        mbedtls_ssl_close_notify(data->tls);
+        char rest[256];
+        while (connection_receive(data, rest, sizeof rest) > 0) {
+        }
+        mbedtls_ssl_free(data->tls);
+        data->tls = nullptr;
+    }
+    if (data->fd >= 0) {
+        net_close(data->fd);
+    }
+    net_close(session->passive);
+    session->passive = -1;
+}
+
+static void ftp_send_file(FtpSession *session, String path)
+{
+    size_t index = 0;
+    if (!ftp_find(session->ftp, path, &index)) {
+        reply(&session->control, "550 no such file\r\n");
+        return;
+    }
+    reply(&session->control, "150 sending\r\n");
+    Connection data;
+    mbedtls_ssl_context tls;
+    if (ftp_open_data(session, &data, &tls)) {
+        if (str_contains(path, S("slow"))) {
+            clock_sleep_ms(SLOW_ROUTE_MS);
+        }
+        connection_send(&data, session->ftp->contents.items[index]);
+    }
+    ftp_close_data(session, &data);
+    reply(&session->control, "226 sent\r\n");
+}
+
+static void ftp_receive_file(FtpSession *session, String path)
+{
+    reply(&session->control, "150 receiving\r\n");
+    Connection data;
+    mbedtls_ssl_context tls;
+    StringBuilder contents = str_builder_create(session->ftp->arena, 256);
+    if (ftp_open_data(session, &data, &tls)) {
+        char buffer[4096];
+        int got = 0;
+        while ((got = connection_receive(&data, buffer, sizeof buffer)) > 0) {
+            str_builder_append(&contents, (String){ buffer, (size_t)got });
+        }
+    }
+    ftp_close_data(session, &data);
+    ftp_store(session->ftp, path, str_builder_finish(&contents));
+    reply(&session->control, "226 stored\r\n");
+}
+
+// ftp_send_names lists the files in the session's directory.
+static void ftp_send_names(FtpSession *session)
+{
+    FtpServer *ftp = session->ftp;
+    reply(&session->control, "150 listing\r\n");
+    Connection data;
+    mbedtls_ssl_context tls;
+    if (ftp_open_data(session, &data, &tls)) {
+        for (size_t i = 0; i < ftp->paths.count; i++) {
+            String path = ftp->paths.items[i];
+            size_t slash = 0;
+            String directory = str_find_last_char(path, '/', &slash) ? str_slice(path, 0, slash) : S("");
+            String name = directory.len > 0 ? str_slice(path, slash + 1, path.len) : path;
+            if (str_equal(directory, session->directory)) {
+                connection_send(&data, str_concat(ftp->arena, name, S("\r\n")));
+            }
+        }
+    }
+    ftp_close_data(session, &data);
+    reply(&session->control, "226 listed\r\n");
+}
+
+// ftp_answer answers one command and reports whether the session goes on.
+static bool ftp_answer(FtpSession *session, mbedtls_ssl_context *tls, String command, String argument)
+{
+    FtpServer *ftp = session->ftp;
+    Connection *control = &session->control;
+    bool secure = control->tls != nullptr;
+    String path = ftp_path(ftp->arena, session->directory, argument);
+    if (str_equal(command, S("AUTH")) && ftp->auth_tls && !secure) {
+        reply(control, "234 go ahead\r\n");
+        session->reader.start = session->reader.end = 0;
+        return tls_accept(session->server->tls, control, tls);
+    }
+    if (str_equal(command, S("USER"))) {
+        ftp->user = argument;
+        ftp->user_over_tls = secure;
+        reply(control, "331 password, please\r\n");
+    } else if (str_equal(command, S("PASS"))) {
+        reply(control, "230 signed in\r\n");
+    } else if (str_equal(command, S("PBSZ")) || str_equal(command, S("TYPE"))) {
+        reply(control, "200 ok\r\n");
+    } else if (str_equal(command, S("PROT"))) {
+        session->protect = str_equal(argument, S("P"));
+        reply(control, "200 ok\r\n");
+    } else if (str_equal(command, S("PWD"))) {
+        connection_send(control, str_format(ftp->arena, "257 \"/%.*s\"\r\n", (int)session->directory.len,
+                                            session->directory.data));
+    } else if (str_equal(command, S("CWD"))) {
+        session->directory = str_trim_suffix(path, S("/"));
+        reply(control, "250 ok\r\n");
+    } else if (str_equal(command, S("EPSV"))) {
+        ftp_listen(session);
+    } else if (str_equal(command, S("SIZE"))) {
+        size_t index = 0;
+        if (ftp_find(ftp, path, &index)) {
+            connection_send(control, str_format(ftp->arena, "213 %zu\r\n", ftp->contents.items[index].len));
+        } else {
+            reply(control, "550 no such file\r\n");
+        }
+    } else if (str_equal(command, S("RETR"))) {
+        ftp_send_file(session, path);
+    } else if (str_equal(command, S("STOR"))) {
+        ftp_receive_file(session, path);
+    } else if (str_equal(command, S("NLST"))) {
+        ftp_send_names(session);
+    } else if (str_equal(command, S("QUIT"))) {
+        reply(control, "221 bye\r\n");
+        return false;
+    } else {
+        reply(control, "502 not implemented\r\n");
+    }
+    return true;
+}
+
+static void serve_ftp(Server *server, int client)
+{
+    FtpServer *ftp = server->ftp;
+    FtpSession session = { .server = server, .ftp = ftp, .control = { .fd = client }, .passive = -1 };
+    session.reader.connection = &session.control;
+    mbedtls_ssl_context tls;
+    ftp->sessions++;
+    bool ready = !ftp->implicit_tls || tls_accept(server->tls, &session.control, &tls);
+    if (ready) {
+        reply(&session.control, "220 libmc-test FTP\r\n");
+    }
+    String line = { 0 };
+    while (ready && read_line(&session.reader, ftp->arena, &line)) {
+        String command = { 0 };
+        String argument = { 0 };
+        str_cut(line, ' ', &command, &argument);
+        ready = ftp_answer(&session, &tls, command, argument);
+    }
+    if (session.passive >= 0) {
+        net_close(session.passive);
+    }
+    tls_end(&session.control);
     net_close(client);
 }
 
@@ -441,6 +695,8 @@ static void *accept_loop(void *argument)
             (void)net_set_timeouts(client, 5000, nullptr);
             if (server->smtp != nullptr) {
                 serve_smtp(server, client);
+            } else if (server->ftp != nullptr) {
+                serve_ftp(server, client);
             } else {
                 serve(server, client);
             }
@@ -485,22 +741,30 @@ static void tls_server_destroy(TlsServer *tls)
     }
 }
 
-static bool server_start(Test *test, Server *server, TlsServer *tls)
+static bool server_listen(Test *test, Server *server)
 {
-    *server = (Server){ .tls = tls };
     atomic_init(&server->stopping, false);
     return net_listen(S("127.0.0.1:0"), &server->listener, nullptr) == ERR_OK &&
            net_local_address(test->arena, server->listener, &server->address, nullptr) == ERR_OK &&
            thread_start(&server->thread, accept_loop, server, nullptr) == ERR_OK;
 }
 
+static bool server_start(Test *test, Server *server, TlsServer *tls)
+{
+    *server = (Server){ .tls = tls };
+    return server_listen(test, server);
+}
+
 static bool smtp_server_start(Test *test, Server *server, TlsServer *tls, SmtpServer *smtp)
 {
     *server = (Server){ .tls = tls, .smtp = smtp };
-    atomic_init(&server->stopping, false);
-    return net_listen(S("127.0.0.1:0"), &server->listener, nullptr) == ERR_OK &&
-           net_local_address(test->arena, server->listener, &server->address, nullptr) == ERR_OK &&
-           thread_start(&server->thread, accept_loop, server, nullptr) == ERR_OK;
+    return server_listen(test, server);
+}
+
+static bool ftp_server_start(Test *test, Server *server, TlsServer *tls, FtpServer *ftp)
+{
+    *server = (Server){ .tls = tls, .ftp = ftp };
+    return server_listen(test, server);
 }
 
 static void server_stop(Server *server)
@@ -1003,6 +1267,163 @@ static void smtp_rejects_malformed_messages(Test *test)
     test_check(test, smtp_send(&missing, &message, nullptr) == ERR_NOT_FOUND, "a missing CA bundle");
 }
 
+// FTP_FILE has line breaks of both kinds and a NUL, which only a binary transfer keeps.
+static const char FTP_FILE[] = "linje 1\r\nlinje 2\n\0slutt";
+
+static FtpClient *ftp_client(Test *test, const Server *server, const char *scheme, bool allow_plain_ftp)
+{
+    FtpClientConfig config = {
+        .url = local_url(test, server, scheme, ""),
+        .username = S("nora"),
+        .password = S("dukkehjem"),
+        .ca_file = S(CA_FILE),
+        .allow_plain_ftp = allow_plain_ftp,
+    };
+    FtpClient *client = nullptr;
+    Err err = { 0 };
+    test_check(test, ftp_client_create(&config, &client, &err) == ERR_OK, err.msg);
+    return client;
+}
+
+static void ftp_moves_files_over_auth_tls(Test *test)
+{
+    TlsServer tls;
+    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    FtpServer ftp = { .auth_tls = true, .arena = arena_create(0) };
+    Server server;
+    test_check(test, ftp_server_start(test, &server, &tls, &ftp), "starts the FTP server");
+    String dir = { 0 };
+    test_check(test, dir_create_temp(test->arena, S("mc-ftp-"), &dir, nullptr) == ERR_OK, "creates a directory");
+    String original = path_join(test->arena, dir, S("original"));
+    String copy = path_join(test->arena, dir, S("copy"));
+    String contents = { FTP_FILE, sizeof FTP_FILE - 1 };
+    test_check(test, file_write_all(original, contents, 0644, nullptr) == ERR_OK, "writes the file to upload");
+    FtpClient *client = ftp_client(test, &server, "ftp", false);
+    Err err = { 0 };
+    int fd = -1;
+    test_check(test, file_open_read(original, &fd, nullptr) == ERR_OK, "opens the file to upload");
+    test_check(test, ftp_upload(client, nullptr, S("inbox/rapport å.txt"), fd, &err) == ERR_OK, err.msg);
+    file_close(fd);
+    StringList names = { 0 };
+    test_check(test, ftp_list(client, nullptr, test->arena, S("inbox"), &names, &err) == ERR_OK, err.msg);
+    test_check_str(test, str_join(test->arena, names, S(",")), S("rapport å.txt"), "lists the uploaded file");
+    test_check(test, file_create(copy, 0644, &fd, nullptr) == ERR_OK, "creates the copy");
+    test_check(test, ftp_download(client, nullptr, S("inbox/missing.txt"), fd, nullptr) == ERR_NOT_FOUND,
+               "a file that is not on the server");
+    test_check(test, ftp_download(client, nullptr, S("/inbox/rapport å.txt"), fd, &err) == ERR_OK, err.msg);
+    file_close(fd);
+    String downloaded = { 0 };
+    test_check(test, file_read_all(test->arena, copy, &downloaded, nullptr) == ERR_OK, "reads the download");
+    test_check_str(test, downloaded, contents, "the file comes back byte for byte");
+    ftp_client_destroy(client);
+    server_stop(&server);
+    test_check_str(test, ftp.user, S("nora"), "signs in");
+    test_check(test, ftp.user_over_tls, "signs in over TLS");
+    test_check(test, !ftp.data_in_clear, "moves files over TLS");
+    test_check(test, ftp.sessions == 1, "keeps one connection for every call");
+    (void)dir_remove_all(dir, nullptr);
+    tls_server_destroy(&tls);
+    arena_destroy(ftp.arena);
+}
+
+static void ftp_downloads_over_tls_from_the_start(Test *test)
+{
+    TlsServer tls;
+    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    FtpServer ftp = { .implicit_tls = true, .arena = arena_create(0) };
+    ftp_store(&ftp, S("velkommen.txt"), S("Hei"));
+    Server server;
+    test_check(test, ftp_server_start(test, &server, &tls, &ftp), "starts the FTP server");
+    String dir = { 0 };
+    test_check(test, dir_create_temp(test->arena, S("mc-ftp-"), &dir, nullptr) == ERR_OK, "creates a directory");
+    String copy = path_join(test->arena, dir, S("velkommen.txt"));
+    int fd = -1;
+    test_check(test, file_create(copy, 0644, &fd, nullptr) == ERR_OK, "creates the copy");
+    FtpClient *client = ftp_client(test, &server, "ftps", false);
+    Err err = { 0 };
+    test_check(test, ftp_download(client, nullptr, S("velkommen.txt"), fd, &err) == ERR_OK, err.msg);
+    file_close(fd);
+    ftp_client_destroy(client);
+    server_stop(&server);
+    String downloaded = { 0 };
+    test_check(test, file_read_all(test->arena, copy, &downloaded, nullptr) == ERR_OK, "reads the download");
+    test_check_str(test, downloaded, S("Hei"), "downloads the file");
+    (void)dir_remove_all(dir, nullptr);
+    tls_server_destroy(&tls);
+    arena_destroy(ftp.arena);
+}
+
+static void ftp_refuses_servers_without_tls_unless_allowed(Test *test)
+{
+    FtpServer ftp = { .arena = arena_create(0) };
+    ftp_store(&ftp, S("velkommen.txt"), S("Hei"));
+    Server server;
+    test_check(test, ftp_server_start(test, &server, nullptr, &ftp), "starts the FTP server");
+    FtpClient *client = ftp_client(test, &server, "ftp", false);
+    StringList names = { 0 };
+    test_check(test, ftp_list(client, nullptr, test->arena, S(""), &names, nullptr) == ERR_NETWORK,
+               "a server without TLS");
+    ftp_client_destroy(client);
+    test_check(test, ftp.user.len == 0, "signs in to no server without TLS");
+    client = ftp_client(test, &server, "ftp", true);
+    Err err = { 0 };
+    test_check(test, ftp_list(client, nullptr, test->arena, S(""), &names, &err) == ERR_OK, err.msg);
+    test_check_str(test, str_join(test->arena, names, S(",")), S("velkommen.txt"), "lists in the clear when allowed");
+    ftp_client_destroy(client);
+    server_stop(&server);
+    arena_destroy(ftp.arena);
+}
+
+static void ftp_stops_when_cancelled(Test *test)
+{
+    FtpServer ftp = { .arena = arena_create(0) };
+    ftp_store(&ftp, S("slow.txt"), S("late"));
+    Server server;
+    test_check(test, ftp_server_start(test, &server, nullptr, &ftp), "starts the FTP server");
+    String dir = { 0 };
+    test_check(test, dir_create_temp(test->arena, S("mc-ftp-"), &dir, nullptr) == ERR_OK, "creates a directory");
+    int fd = -1;
+    test_check(test, file_create(path_join(test->arena, dir, S("slow.txt")), 0644, &fd, nullptr) == ERR_OK,
+               "creates the copy");
+    FtpClient *client = ftp_client(test, &server, "ftp", true);
+    Cancel cancel;
+    cancel_init(&cancel);
+    DelayedCancel delayed = { .cancel = &cancel, .delay_ms = 100 };
+    Thread canceller;
+    test_check(test, thread_start(&canceller, cancel_later, &delayed, nullptr) == ERR_OK, "starts the canceller");
+    test_check(test, ftp_download(client, &cancel, S("slow.txt"), fd, nullptr) == ERR_CANCELLED,
+               "cancelled mid-transfer");
+    thread_join(&canceller);
+    test_check(test, ftp_download(client, &cancel, S("slow.txt"), fd, nullptr) == ERR_CANCELLED,
+               "a call on a cancelled token does not start");
+    cancel_destroy(&cancel);
+    file_close(fd);
+    ftp_client_destroy(client);
+    server_stop(&server);
+    (void)dir_remove_all(dir, nullptr);
+    arena_destroy(ftp.arena);
+}
+
+static void ftp_rejects_bad_arguments(Test *test)
+{
+    FtpClientConfig config = { .url = S("ftp://localhost:1"), .ca_file = S(CA_FILE) };
+    FtpClient *client = nullptr;
+    test_check(test, ftp_client_create(&config, &client, nullptr) == ERR_OK, "creates a client");
+    test_check(test, ftp_download(client, nullptr, S("a.txt\r\nDELE b.txt"), -1, nullptr) == ERR_INVALID_ARGUMENT,
+               "a line break in a path");
+    test_check(test, ftp_upload(client, nullptr, S("inbox/"), -1, nullptr) == ERR_INVALID_ARGUMENT,
+               "a remote path that names no file");
+    ftp_client_destroy(client);
+    config.url = S("http://localhost:1");
+    test_check(test, ftp_client_create(&config, &client, nullptr) == ERR_OK, "creates a client");
+    StringList names = { 0 };
+    test_check(test, ftp_list(client, nullptr, test->arena, S(""), &names, nullptr) == ERR_INVALID_ARGUMENT,
+               "a URL that is not FTP");
+    ftp_client_destroy(client);
+    config.ca_file = S("tests/fixtures/tls/missing.pem");
+    test_check(test, ftp_client_create(&config, &client, nullptr) == ERR_NOT_FOUND, "a missing CA bundle");
+}
+
 const TestCase HTTP_TESTS[] = {
     { "http_sends_requests_and_reads_responses", http_sends_requests_and_reads_responses },
     { "http_follows_redirects_within_the_rules", http_follows_redirects_within_the_rules },
@@ -1022,5 +1443,14 @@ const TestCase SMTP_TESTS[] = {
     { "smtp_refuses_servers_without_starttls", smtp_refuses_servers_without_starttls },
     { "smtp_reports_a_refused_recipient", smtp_reports_a_refused_recipient },
     { "smtp_rejects_malformed_messages", smtp_rejects_malformed_messages },
+    { nullptr, nullptr },
+};
+
+const TestCase FTP_TESTS[] = {
+    { "ftp_moves_files_over_auth_tls", ftp_moves_files_over_auth_tls },
+    { "ftp_downloads_over_tls_from_the_start", ftp_downloads_over_tls_from_the_start },
+    { "ftp_refuses_servers_without_tls_unless_allowed", ftp_refuses_servers_without_tls_unless_allowed },
+    { "ftp_stops_when_cancelled", ftp_stops_when_cancelled },
+    { "ftp_rejects_bad_arguments", ftp_rejects_bad_arguments },
     { nullptr, nullptr },
 };

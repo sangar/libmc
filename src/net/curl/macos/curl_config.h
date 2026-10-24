@@ -77,7 +77,7 @@
 #define CURL_DISABLE_FORM_API 1
 
 /* disables FTP */
-#define CURL_DISABLE_FTP 1
+/* #undef CURL_DISABLE_FTP */
 
 /* disables curl_easy_options API for existing options to curl_easy_setopt */
 /* #undef CURL_DISABLE_GETOPTIONS */
