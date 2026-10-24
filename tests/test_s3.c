@@ -453,10 +453,24 @@ static void s3_stores_reads_and_removes_objects(Test *test)
 
     const HttpHeader metadata[] = { { S("SHA256"), S("abc") }, { S("mtime"), S("42") } };
     S3PutOptions options = { .metadata = { metadata, countof(metadata) }, .content_type = S("text/plain") };
-    String key = S("dir/a file+ü.txt");
+    // Keys are bytes to S3: æ, ø and å in both cases, and å decomposed as macOS file names give it, stay distinct.
+    String key = S("dir/a file+ÆØÅ æøå.txt");
+    String decomposed = S("dir/a\xcc\x8a.txt");
+    String composed = S("dir/\xc3\xa5.txt");
     String etag = { 0 };
     test_check(test, s3_put(client, nullptr, test->arena, key, S("hello"), &options, &etag, &err) == ERR_OK, err.msg);
-    test_check_str(test, etag, S("etag-dir/a file+ü.txt"), "the ETag, without quotes, of a key that needs encoding");
+    test_check_str(test, etag, S("etag-dir/a file+ÆØÅ æøå.txt"), "the ETag, without quotes, of a key that needs encoding");
+    test_check(test, s3_put(client, nullptr, test->arena, decomposed, S("decomposed"), nullptr, &etag, &err) == ERR_OK &&
+                         s3_put(client, nullptr, test->arena, composed, S("composed"), nullptr, &etag, &err) == ERR_OK,
+               err.msg);
+    String stored = { 0 };
+    S3Object described = { 0 };
+    test_check(test, s3_get(client, nullptr, test->arena, decomposed, &stored, &described, &err) == ERR_OK &&
+                         str_equal(stored, S("decomposed")),
+               "a decomposed å is its own key");
+    test_check(test, s3_get(client, nullptr, test->arena, composed, &stored, &described, &err) == ERR_OK &&
+                         str_equal(stored, S("composed")),
+               "and a composed å another");
 
     String body = { 0 };
     S3Object object = { 0 };
@@ -551,7 +565,7 @@ static void s3_lists_every_page(Test *test)
     test_check(test, fake_start(test, &s3), "starts the fake S3");
     S3Client *client = fake_client(test, &s3, 0);
     Err err = { 0 };
-    const char *const keys[] = { "a/1", "a/2", "a/3 &", "a/4", "a/5", "b/1" };
+    const char *const keys[] = { "a/1", "a/2", "a/3 & æøå", "a/4 ÆØÅ", "a/5", "b/1" };
     for (size_t i = 0; i < countof(keys); i++) {
         String etag = { 0 };
         test_check(test, s3_put(client, nullptr, test->arena, S(keys[i]), S(keys[i]), nullptr, &etag, &err) == ERR_OK,
@@ -560,9 +574,10 @@ static void s3_lists_every_page(Test *test)
     S3ObjectList objects = { 0 };
     test_check(test, s3_list(client, nullptr, test->arena, S("a/"), &objects, &err) == ERR_OK, err.msg);
     test_check(test, objects.count == 5, "five keys over three pages");
-    test_check_str(test, objects.count > 2 ? objects.items[2].key : S(""), S("a/3 &"), "an escaped key");
-    test_check_str(test, objects.count > 2 ? objects.items[2].etag : S(""), S("etag-a/3 &"), "the ETag without quotes");
-    test_check(test, objects.count > 2 && objects.items[2].size == 5, "the size");
+    test_check_str(test, objects.count > 2 ? objects.items[2].key : S(""), S("a/3 & æøå"), "an escaped key");
+    test_check_str(test, objects.count > 3 ? objects.items[3].key : S(""), S("a/4 ÆØÅ"), "upper case æ, ø and å");
+    test_check_str(test, objects.count > 2 ? objects.items[2].etag : S(""), S("etag-a/3 & æøå"), "the ETag without quotes");
+    test_check(test, objects.count > 2 && objects.items[2].size == (int64_t)strlen("a/3 & æøå"), "the size in bytes");
     test_check(test, objects.count > 0 && objects.items[0].last_modified_ns == 1710324000LL * NS_PER_SECOND + 250000000,
                "LastModified with its milliseconds");
     test_check(test, s3_list(client, nullptr, test->arena, S("c/"), &objects, &err) == ERR_OK && objects.count == 0,
@@ -691,7 +706,7 @@ static void s3_reaches_a_live_store(Test *test)
     }
     test_check(test, s3_create_bucket(client, nullptr, test->arena, &err) == ERR_OK, err.msg);
     String prefix = str_format(test->arena, "libmc-test-%lld/", (long long)(clock_wall_ns() / NS_PER_MILLISECOND));
-    String key = str_concat(test->arena, prefix, S("a ü+&=.txt"));
+    String key = str_concat(test->arena, prefix, S("a æøå ÆØÅ+&=.txt"));
     const HttpHeader metadata[] = { { S("sha256"), S("live") } };
     S3PutOptions options = { .metadata = { metadata, countof(metadata) } };
     String etag = { 0 };
