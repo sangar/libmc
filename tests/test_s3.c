@@ -712,6 +712,9 @@ static void s3_reaches_a_live_store(Test *test)
     String back = { 0 };
     test_check(test, file_read_all(test->arena, big_path, &back, &err) == ERR_OK && str_equal(back, big),
                "a multipart upload comes back whole");
+    test_check(test, s3_head(client, nullptr, test->arena, big_key, &object, &err) == ERR_OK &&
+                         object.size == (int64_t)big.len,
+               "HEAD of an object larger than max_response_bytes");
     file_close(fd);
 
     S3ObjectList objects = { 0 };

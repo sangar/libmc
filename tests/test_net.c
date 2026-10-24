@@ -615,6 +615,9 @@ static void http_enforces_limits(Test *test)
                "a body over the limit, by its Content-Length");
     test_check(test, send_to(test, client, &server, "GET", "/large-chunked", S(""), &response, &err) == ERR_UNSUPPORTED,
                "a chunked body that grows over the limit");
+    test_check(test, send_to(test, client, &server, "HEAD", "/large", S(""), &response, &err) == ERR_OK &&
+                         response.status == 200,
+               "a HEAD whose Content-Length is over the limit");
     test_check(test, send_to(test, client, &server, "GET", "/slow", S(""), &response, &err) == ERR_TIMEOUT,
                "a response slower than the timeout");
     test_check(test, send_to(test, client, &server, "BREW", "/echo", S(""), &response, &err) == ERR_INVALID_ARGUMENT,

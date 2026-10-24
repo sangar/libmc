@@ -293,8 +293,10 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, (long)((client->config.stall_timeout_ms + 999) / 1000));
     }
-    // A download's size is not the memory limit's business; receive_body applies the limit to bodies it keeps.
-    if (hop->download == nullptr) {
+    // A download's size is not the memory limit's business, nor is the Content-Length of a HEAD, which has
+    // no body; receive_body applies the limit to bodies it keeps.
+    bool head = strcmp(hop_request->method, "HEAD") == 0;
+    if (hop->download == nullptr && !head) {
         curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)client->config.max_response_bytes);
     }
     // An empty list asks for every encoding curl decodes, gzip and deflate; receive_body counts decoded bytes.
@@ -317,7 +319,7 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
     if (headers != nullptr) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
-    if (strcmp(hop_request->method, "HEAD") == 0) {
+    if (head) {
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
     } else if (strcmp(hop_request->method, "GET") != 0) {
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, hop_request->method);
