@@ -26,12 +26,12 @@ Small items, such as the unmerged commits on `terminal-width` and `unicode-text`
 
 ## Where we are
 
-`master` is at `9b80f1b` from 24 October 2026, with the HTTP client (PR #19) merged. Mozilla's trusted roots for systems without their own are on `trusted-roots`.
+`master` is at `aa19c7e` from 24 October 2026, with the HTTP client (PR #19) and Mozilla's trusted roots for systems without their own (PR #20) merged. Markdown is on `markdown`.
 
 | Branch | State | Last commit | Tests |
 |---|---|---|---|
-| `master` | Merged | `9b80f1b`, 24 Oct 2026, PR #19 | GitHub CI passes on macOS, Linux x86_64 and aarch64 with clang 18 and gcc 14, and the cross builds |
-| `trusted-roots` | Not merged | On top of `9b80f1b` | `./nob test` passes on macOS; in `ubuntu:24.04` without `ca-certificates`, `LIBMC_LIVE_TESTS=1` reaches three live hosts through the built-in roots |
+| `master` | Merged | `aa19c7e`, 24 Oct 2026, PR #20 | GitHub CI passes on macOS, Linux x86_64 and aarch64 with clang 18 and gcc 14, and the cross builds |
+| `markdown` | Not merged | On top of `aa19c7e` | `./nob check` passes on macOS, with all 652 CommonMark spec examples |
 | `unicode-text` | One commit not merged, pushed, no pull request | `08e7868`, "Allow the deliberate ASCII ignore-case calls" | Not run |
 | `terminal-width` | One commit not merged, local only | `b30d282`, "Measure the terminal width of UTF-8 text" | Not run |
 
@@ -47,11 +47,11 @@ Done. Merged on 24 October 2026 through PR #19: `mc/net/http.h` on curl and mbed
 
 ## Markdown and XML
 
-Next, each on its own branch. JSON, YAML and CSV are in libmc; Markdown and XML are the formats projects use most that it lacks.
+Now, each on its own branch. JSON, YAML and CSV are in libmc; Markdown and XML are the formats projects use most that it lacks.
 
-- [ ] **Render Markdown to HTML.** md4c (MIT) passes the CommonMark 0.31.2 compliance tests and supports GitHub's tables, task lists, strikethrough and autolinks, which is what people expect from Markdown since GitHub. `mc/encoding/markdown.h` on a branch `markdown`. Raw HTML in Markdown from users lets them inject scripts, so it is off by default, with `MD_FLAG_NOHTMLSPANS` and `MD_FLAG_NOHTMLBLOCKS`, and a caller turns it on for trusted text.
-      1. [ ] A decision report, md4c against cmark-gfm, approved.
-      2. [ ] Pin md4c, wrap it and test it with examples from the CommonMark spec.
+- [x] **Render Markdown to HTML.** Done on 24 October 2026 on `markdown`: `mc/encoding/markdown.h` renders CommonMark 0.31.2 with GitHub's tables, task lists, strikethrough and autolinks, which is what people expect from Markdown since GitHub. Raw HTML in Markdown from users lets them inject scripts, so by default it is shown as text and links to `javascript:`, `vbscript:`, `file:` and `data:` URLs are emptied, as cmark does; `allow_html` turns both off for trusted text.
+      1. [x] **A decision report, md4c against cmark-gfm, approved** on 24 October 2026. cmark-gfm's last release is from July 2023 and keeps its extensions in a process-wide registry; md4c 0.6.0 is from September 2026 and has no global state.
+      2. [x] **md4c pinned and wrapped.** md4c's own HTML renderer has no link filter, so libmc renders from md4c's callbacks itself. The output matches all 652 examples of the CommonMark spec, which come with md4c in `deps/md4c/test/spec.txt`; in three of them GitHub's autolinks link a bare URL, as GitHub does.
 - [ ] **Read XML.** Expat (MIT) is a stream-oriented parser that calls handlers as it meets elements. Go's `encoding/xml` offers both a token stream, `Decoder.Token`, and `Unmarshal` into structs. libmc starts with the stream, `mc/encoding/xml.h` on a branch `xml`, and adds a tree when a project needs one.
       1. [ ] A decision report, Expat against libxml2, approved.
       2. [ ] Pin Expat, with its configuration header written by hand like curl's.
@@ -80,6 +80,7 @@ After mail and file transfer, and blocked. curl speaks SSH and SFTP through libs
 
 ### Later
 
+- **Footnotes and GitHub's alerts in Markdown.** md4c 0.6.0 parses both; `src/encoding/markdown.c` needs their HTML.
 - **Brotli and zstd responses.** Each is another dependency, and gzip covers most APIs.
 - **Property lists,** on libmc's Foundation direction, once XML is in.
 - **An XML tree and writing XML,** when a project needs more than the stream.
