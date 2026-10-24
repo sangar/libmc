@@ -161,10 +161,13 @@ static String route(Arena *arena, String request)
     return answer(arena, 404, "", S("no such route"));
 }
 
+// TlsServer shares mbedTLS's process-wide crypto state with libcurl, which frees it, keys and all, when the
+// last HttpClient is destroyed. pin is an HttpClient that keeps it alive until the server is destroyed.
 typedef struct TlsServer {
     mbedtls_ssl_config config;
     mbedtls_x509_crt certificate;
     mbedtls_pk_context key;
+    HttpClient *pin;
 } TlsServer;
 
 typedef struct Server {
@@ -196,7 +199,6 @@ static int tls_receive(void *context, unsigned char *buffer, size_t capacity)
 typedef struct Http2Connection {
     Connection *connection;
     String remaining;
-    bool done;
 } Http2Connection;
 
 static const char HTTP2_BODY[] = "served over HTTP/2";
@@ -236,14 +238,9 @@ static int http2_on_frame(nghttp2_session *session, const nghttp2_frame *frame, 
     return nghttp2_submit_response2(session, frame->hd.stream_id, &status, 1, &body);
 }
 
-static int http2_on_close(nghttp2_session *session, int32_t stream_id, uint32_t error_code, void *user_data)
-{
-    Http2Connection *h2 = user_data;
-    h2->done = true;
-    return 0;
-}
-
-// serve_http2 answers one request on a connection that negotiated HTTP/2, then ends the session.
+// serve_http2 answers requests on a connection that negotiated HTTP/2 until the client closes it. Closing
+// first would leave the client's last frames unread, and Linux then resets the connection, discarding the
+// response before the client reads it.
 static void serve_http2(Connection *connection)
 {
     nghttp2_session_callbacks *callbacks = nullptr;
@@ -254,7 +251,6 @@ static void serve_http2(Connection *connection)
     }
     nghttp2_session_callbacks_set_send_callback2(callbacks, http2_send);
     nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, http2_on_frame);
-    nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, http2_on_close);
     int created = nghttp2_session_server_new(&session, callbacks, &h2);
     nghttp2_session_callbacks_del(callbacks);
     if (created != 0) {
@@ -262,14 +258,12 @@ static void serve_http2(Connection *connection)
     }
     (void)nghttp2_submit_settings(session, NGHTTP2_FLAG_NONE, nullptr, 0);
     char buffer[4096];
-    while (!h2.done && nghttp2_session_send(session) == 0) {
+    while (nghttp2_session_send(session) == 0) {
         int got = connection_receive(connection, buffer, sizeof buffer);
         if (got <= 0 || nghttp2_session_mem_recv2(session, (const uint8_t *)buffer, (size_t)got) < 0) {
             break;
         }
     }
-    (void)nghttp2_session_terminate_session(session, NGHTTP2_NO_ERROR);
-    (void)nghttp2_session_send(session);
     nghttp2_session_del(session);
 }
 
@@ -320,8 +314,11 @@ static bool tls_server_create(Test *test, TlsServer *tls, bool http2)
 {
     String certificate = { 0 };
     String key = { 0 };
+    HttpClientConfig pin = { .ca_file = S(CA_FILE) };
+    tls->pin = nullptr;
     if (file_read_all(test->arena, S(SERVER_CERT_FILE), &certificate, nullptr) != ERR_OK ||
-        file_read_all(test->arena, S(SERVER_KEY_FILE), &key, nullptr) != ERR_OK || psa_crypto_init() != PSA_SUCCESS) {
+        file_read_all(test->arena, S(SERVER_KEY_FILE), &key, nullptr) != ERR_OK ||
+        http_client_create(&pin, &tls->pin, nullptr) != ERR_OK || psa_crypto_init() != PSA_SUCCESS) {
         return false;
     }
     mbedtls_ssl_config_init(&tls->config);
@@ -341,6 +338,9 @@ static void tls_server_destroy(TlsServer *tls)
     mbedtls_ssl_config_free(&tls->config);
     mbedtls_x509_crt_free(&tls->certificate);
     mbedtls_pk_free(&tls->key);
+    if (tls->pin != nullptr) {
+        http_client_destroy(tls->pin);
+    }
 }
 
 static bool server_start(Test *test, Server *server, TlsServer *tls)
