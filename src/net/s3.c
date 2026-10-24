@@ -521,7 +521,7 @@ static S3Object describe(Arena *arena, String key, const HttpResponse *response)
     size_t prefix = sizeof META_PREFIX - 1;
     size_t metadata_count = 0;
     for (size_t i = 0; i < response->header_count; i++) {
-        metadata_count += str_starts_with(str_lower_ascii(arena, response->headers[i].name), S(META_PREFIX)); // modern-c: allow ascii-text
+        metadata_count += str_equal_ignore_case(str_slice(response->headers[i].name, 0, prefix), S(META_PREFIX));
     }
     HttpHeader *metadata = arena_push(arena, arena_size_mul(metadata_count + 1, sizeof *metadata));
     for (size_t i = 0; i < response->header_count; i++) {
