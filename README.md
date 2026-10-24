@@ -7,7 +7,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, [md4c](https://github.com/mity/md4c) for Markdown, [Expat](https://libexpat.github.io) for XML and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP and mail, with [Mozilla's trusted roots](https://curl.se/docs/caextract.html) for systems that have none, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, [md4c](https://github.com/mity/md4c) for Markdown, [Expat](https://libexpat.github.io) for XML and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP, mail and FTP, with [Mozilla's trusted roots](https://curl.se/docs/caextract.html) for systems that have none, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services, the terminal, pseudo-terminals and system statistics.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
 
@@ -55,7 +55,7 @@ CI runs `./nob test` and `./nob release` with clang 18 and gcc 14 on Linux x86_6
 
 ## Usage
 
-Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching and `-framework SystemConfiguration -framework CoreFoundation` for HTTP and mail, and add `include/` to the include path. To build it with your project, pin this repository as a dependency and run `./nob release` in it, which fetches libmc's own dependencies. Headers are included by area and module:
+Link `libmc.a` with `-lpthread -lm`, and on macOS `-framework CoreServices` for file watching and `-framework SystemConfiguration -framework CoreFoundation` for HTTP, mail and FTP, and add `include/` to the include path. To build it with your project, pin this repository as a dependency and run `./nob release` in it, which fetches libmc's own dependencies. Headers are included by area and module:
 
 ```c
 #include <stdio.h>
@@ -159,6 +159,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | net | `mc/net/http.h` | HTTPS requests on libcurl: HTTP/2 where the server offers it, gzip and deflate decoded, allowed hosts checked on every redirect, limits on time and size, bodies streamed from and to files, cancellation, Mozilla's trusted roots where the system has none |
 | | `mc/net/smtp.h` | Mail over SMTPS or STARTTLS: from, to, cc and bcc, UTF-8 subject and names, text with an HTML alternative, attachments |
 | | `mc/net/s3.h` | S3 and the stores that speak its API: objects in memory or files, multipart uploads, metadata, paged listing, retries with backoff, credentials found as the AWS tools find them; thread-safe, with pooled connections |
+| | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
 
