@@ -17,7 +17,9 @@ typedef struct HttpHeader {
 // HttpClientConfig holds what applies to every request. Zero values take the
 // default named beside each field.
 typedef struct HttpClientConfig {
-    // ca_file is a PEM bundle of trusted roots; empty uses the system's, http_default_ca_file.
+    // ca_file is a PEM bundle of trusted roots; empty uses the system's,
+    // http_default_ca_file, or Mozilla's roots built into libmc where the
+    // system has none, as in minimal containers.
     String ca_file;
     // user_agent is sent with every request; many APIs refuse a generic one.
     String user_agent;
@@ -65,7 +67,7 @@ typedef struct HttpClient HttpClient;
 // /etc/ssl/certs/ca-certificates.crt on Debian; empty when none is found.
 String http_default_ca_file(void);
 
-// http_client_create copies config. A missing CA bundle is ERR_NOT_FOUND.
+// http_client_create copies config. A ca_file that does not exist is ERR_NOT_FOUND.
 [[nodiscard]] Error http_client_create(const HttpClientConfig *config, HttpClient **client, Err *err);
 void http_client_destroy(HttpClient *client);
 

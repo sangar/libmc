@@ -107,6 +107,7 @@ static const char *const NGHTTP2_FLAGS[] = {
 };
 
 static const char *const ZLIB_DIRECTORIES[] = { "deps/zlib" };
+static const char *const CACERT_DIRECTORIES[] = { "deps/cacert" };
 // HAVE_UNISTD_H is what zlib's configure step finds on macOS and Linux.
 static const char *const ZLIB_FLAGS[] = { "-std=c11", "-w", "-DHAVE_UNISTD_H=1" };
 
@@ -124,7 +125,7 @@ static const char *const CURL_FLAGS[] = {
 // and nghttp2: src/net/http.c includes curl's, and the HTTP tests run a TLS
 // server that answers HTTP/2.
 static const char *const LIBMC_FLAGS[] = {
-    "-Iinclude", "-Ideps/cyaml", "-Ideps/utf8proc", "-Ideps/yyjson", "-Ideps/curl/include", "-DCURL_STATICLIB",
+    "-Iinclude", "-Ideps/cyaml", "-Ideps/utf8proc", "-Ideps/yyjson", "-Ideps/curl/include", "-DCURL_STATICLIB", "-Ideps/cacert",
     MBEDTLS_PUBLIC_FLAGS, NGHTTP2_PUBLIC_FLAGS,
 };
 
@@ -141,6 +142,8 @@ static const Dependency DEPENDENCIES[] = {
       sizeof NGHTTP2_FLAGS / sizeof *NGHTTP2_FLAGS, false },
     { ZLIB_DIRECTORIES, sizeof ZLIB_DIRECTORIES / sizeof *ZLIB_DIRECTORIES, ZLIB_FLAGS,
       sizeof ZLIB_FLAGS / sizeof *ZLIB_FLAGS, false },
+    { CACERT_DIRECTORIES, sizeof CACERT_DIRECTORIES / sizeof *CACERT_DIRECTORIES, C11_FLAGS,
+      sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
     { CURL_DIRECTORIES, sizeof CURL_DIRECTORIES / sizeof *CURL_DIRECTORIES, CURL_FLAGS,
       sizeof CURL_FLAGS / sizeof *CURL_FLAGS, true },
 };
@@ -148,7 +151,7 @@ static const Dependency DEPENDENCIES[] = {
 // HEADER_DIRECTORIES are the dependency headers whose changes rebuild everything.
 static const char *const HEADER_DIRECTORIES[] = {
     "deps/cyaml", "deps/utf8proc", "deps/yyjson", "deps/curl/include/curl", "deps/mbedtls/include/mbedtls",
-    "deps/mbedtls/tf-psa-crypto/include/psa", "deps/nghttp2/lib/includes/nghttp2", "deps/zlib", "src/net",
+    "deps/mbedtls/tf-psa-crypto/include/psa", "deps/nghttp2/lib/includes/nghttp2", "deps/zlib", "deps/cacert", "src/net",
 };
 
 static void command_push(Command *command, const char *item)
