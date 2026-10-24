@@ -8,13 +8,12 @@ Checked on 2026-10-24
 
 ## Focus
 
-libmc is in use by projects under the `modern-c` contract, such as dbox and bprocs, and is where they get shared code. JSON, YAML, CSV and the HTTP client are in. What moves it forward now are the pieces those projects reach for next, in this order:
+libmc is in use by projects under the `modern-c` contract, such as dbox and bprocs, and is where they get shared code. JSON, YAML, CSV, Markdown, XML and the HTTP client are in. What moves it forward now are the pieces those projects reach for next, in this order:
 
-1. **Markdown and XML:** rendering Markdown and reading XML, the two formats projects use most that libmc lacks. See [Markdown and XML](#markdown-and-xml).
-2. **Mail and file transfer:** sending mail over SMTP and moving files over FTP, both through the curl libmc already pins. See [Mail and file transfer](#mail-and-file-transfer).
-3. **SSH and SFTP:** waits for libssh2 to build with mbedTLS 4. See [SSH and SFTP](#ssh-and-sftp).
+1. **Mail and file transfer:** sending mail over SMTP and moving files over FTP, both through the curl libmc already pins. See [Mail and file transfer](#mail-and-file-transfer).
+2. **SSH and SFTP:** waits for libssh2 to build with mbedTLS 4. See [SSH and SFTP](#ssh-and-sftp).
 
-Small items, such as the unmerged commits on `terminal-width` and `unicode-text`, wait unless they block one of these.
+After them come the ideas [worth doing soon](#worth-doing-soon). Small items, such as the unmerged commit on `terminal-width`, wait unless they block one of these.
 
 ## Principles
 
@@ -26,18 +25,19 @@ Small items, such as the unmerged commits on `terminal-width` and `unicode-text`
 
 ## Where we are
 
-`master` is at `5577b1f` from 24 October 2026, with the HTTP client (PR #19), Mozilla's trusted roots for systems without their own (PR #20) and Markdown (PR #21) merged. XML is on `xml`.
+`master` is at `37d58b8` from 24 October 2026, with the HTTP client (PR #19), Mozilla's trusted roots for systems without their own (PR #20), Markdown (PR #21) and XML (PR #22) merged. Sending mail is on `smtp`. The branches already merged or superseded were deleted on GitHub on 24 October 2026.
 
 | Branch | State | Last commit | Tests |
 |---|---|---|---|
-| `master` | Merged | `5577b1f`, 24 Oct 2026, PR #21 | GitHub CI passes on macOS, Linux x86_64 and aarch64 with clang 18 and gcc 14, and the cross builds |
-| `xml` | Not merged | On top of `5577b1f` | `./nob check` passes on macOS |
-| `unicode-text` | One commit not merged, pushed, no pull request | `08e7868`, "Allow the deliberate ASCII ignore-case calls" | Not run |
+| `master` | Merged | `37d58b8`, 24 Oct 2026, PR #22 | GitHub CI passes on macOS, Linux x86_64 and aarch64 with clang 18 and gcc 14, and the cross builds |
+| `smtp` | Not merged | On top of `37d58b8` | `./nob test` passes on macOS |
 | `terminal-width` | One commit not merged, local only | `b30d282`, "Measure the terminal width of UTF-8 text" | Not run |
 
 On 24 October 2026 dependencies stopped being committed. curl and mbedTLS would have added 13.7 MB of source, 5.5 MB in git, to every clone and to every project that pins libmc. `deps.lock` now pins each dependency by content hash, the build fetches it, and cyaml, yyjson, utf8proc, mbedTLS, curl, nghttp2 and zlib are published as `deps-*` releases.
 
 The first GitHub CI run of the HTTP client failed on Linux, where it had passed locally. The test's HTTP/2 server closed the connection with the client's last frames unread, and Linux then resets the connection, discarding the response. Keeping the connection open until the client closes it showed a second fault: destroying the last `HttpClient` frees mbedTLS's crypto state, which the test server shares, so the TLS test server now holds an `HttpClient` of its own.
+
+Under gcc's sanitizers on Linux, the billion laughs test of XML took 100 seconds and timed the suite out, against 2 seconds under clang's; its innermost entity is now 1 KiB, so Expat's check comes after far fewer expansions. `watch_outlives_many_removed_directories` fails about 2 runs in 7 on macOS, on `master` too, and is not fixed yet.
 
 ## HTTP client
 
@@ -47,21 +47,21 @@ Done. Merged on 24 October 2026 through PR #19: `mc/net/http.h` on curl and mbed
 
 ## Markdown and XML
 
-Now, each on its own branch. JSON, YAML and CSV are in libmc; Markdown and XML are the formats projects use most that it lacks.
+Done. Merged on 24 October 2026 through PRs #21 and #22: the two formats projects use most that libmc lacked.
 
 - [x] **Render Markdown to HTML.** Merged on 24 October 2026 through PR #21: `mc/encoding/markdown.h` renders CommonMark 0.31.2 with GitHub's tables, task lists, strikethrough and autolinks, which is what people expect from Markdown since GitHub. Raw HTML in Markdown from users lets them inject scripts, so by default it is shown as text and links to `javascript:`, `vbscript:`, `file:` and `data:` URLs are emptied, as cmark does; `allow_html` turns both off for trusted text.
       1. [x] **A decision report, md4c against cmark-gfm, approved** on 24 October 2026. cmark-gfm's last release is from July 2023 and keeps its extensions in a process-wide registry; md4c 0.6.0 is from September 2026 and has no global state.
       2. [x] **md4c pinned and wrapped.** md4c's own HTML renderer has no link filter, so libmc renders from md4c's callbacks itself. The output matches all 652 examples of the CommonMark spec, which come with md4c in `deps/md4c/test/spec.txt`; in three of them GitHub's autolinks link a bare URL, as GitHub does.
-- [x] **Read XML.** Done on 24 October 2026 on `xml`: `mc/encoding/xml.h` reads a document into start tags, end tags and text, like the tokens of Go's `xml.Decoder`, with names as written and namespaces not resolved. A tree, as Go's `Unmarshal` gives, waits for a project that needs one.
+- [x] **Read XML.** Merged on 24 October 2026 through PR #22: `mc/encoding/xml.h` reads a document into start tags, end tags and text, like the tokens of Go's `xml.Decoder`, with names as written and namespaces not resolved. A tree, as Go's `Unmarshal` gives, waits for a project that needs one.
       1. [x] **A decision report, Expat against libxml2, approved** on 24 October 2026. libxml2's maintainer stepped down in September 2025; Expat 2.9.0 is from October 2026 and fixes vulnerabilities as they come.
       2. [x] **Expat pinned,** with `src/encoding/expat_config.h` written by hand. It seeds its hash salt with `getentropy`, which macOS and glibc both have, so one configuration fits both.
       3. [x] **The event API,** with Expat's protection against entity expansion ("billion laughs") left on and external entities never loaded, both tested. Against James Clark's XML test cases, which may not be redistributed in part and so are not in the tests, it refuses all 186 malformed documents and matches the canonical form of the 113 valid ones that have no processing instructions, except 4 whose canonical form keeps notation declarations.
 
 ## Mail and file transfer
 
-After Markdown and XML, each on its own branch. Both are in the curl libmc already pins and are turned off in `tools/curl-config.sh`; each turns its protocol on and regenerates `src/net/curl/<os>/curl_config.h`.
+Now, each on its own branch. Both are in the curl libmc already pins and are turned off in `tools/curl-config.sh`; each turns its protocol on and regenerates `src/net/curl/<os>/curl_config.h`.
 
-- [ ] **Send mail with attachments.** Go's `net/smtp` is frozen and takes the message as raw bytes, leaving MIME to the caller. `mc/net/smtp.h`, on a branch `smtp`, builds the message with its attachments through curl's MIME API and sends it over SMTPS or STARTTLS only. It turns on SMTP and MIME.
+- [x] **Send mail with attachments.** Done on 24 October 2026 on `smtp`. Go's `net/smtp` is frozen and takes the message as raw bytes, leaving MIME to the caller; Python's `email` package and Node's nodemailer build it from fields, and so does `smtp_send`: from, to, cc and bcc, a UTF-8 subject and names as RFC 2047 words, the text with an HTML alternative, and attachments with UTF-8 file names as RFC 2231 has them. It sends over SMTPS or STARTTLS only, and refuses a server that offers no STARTTLS before the password or the mail leaves. SMTP and MIME are on in `tools/curl-config.sh`. Tested against a server in the tests, not yet against a real provider.
 - [ ] **Upload and download files over FTP.** `mc/net/ftp.h`, on a branch `ftp`: FTPS by default, and plain FTP only when the caller asks, as `allow_plain_http` does for HTTP. It turns on FTP.
 
 ## SSH and SFTP
@@ -77,6 +77,7 @@ After mail and file transfer, and blocked. curl speaks SSH and SFTP through libs
 - **URL parsing:** `mc/net/url.h` on curl's URL API, which is already compiled in, to parse, build and normalise URLs.
 - **WebSocket client:** curl supports it; it is one flag in `tools/curl-config.sh`.
 - **Compression:** gzip and deflate for files and archives, on the zlib the HTTP client brings.
+- **Signing in to Gmail and Microsoft 365 with OAuth:** both refuse passwords for most accounts; curl sends an OAuth token with `CURLOPT_XOAUTH2_BEARER`.
 
 ### Later
 

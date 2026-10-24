@@ -110,7 +110,7 @@
 /* #undef CURL_DISABLE_LIBCURL_OPTION */
 
 /* disables MIME support */
-#define CURL_DISABLE_MIME 1
+/* #undef CURL_DISABLE_MIME */
 
 /* disables local binding support */
 #define CURL_DISABLE_BINDLOCAL 1
@@ -149,7 +149,7 @@
 /* #undef CURL_DISABLE_SHUFFLE_DNS */
 
 /* disables SMTP */
-#define CURL_DISABLE_SMTP 1
+/* #undef CURL_DISABLE_SMTP */
 
 /* disabled WebSocket */
 #define CURL_DISABLE_WEBSOCKETS 1

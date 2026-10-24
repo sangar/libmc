@@ -10,12 +10,14 @@
 #include "psa/crypto.h"
 
 #include "mc/net/http.h"
+#include "mc/net/smtp.h"
 #include "mc/platform/platform.h"
 
-// The tests run the client against a server on 127.0.0.1 in a thread of this
+// The tests run the clients against a server on 127.0.0.1 in a thread of this
 // process, over plain HTTP or TLS with the certificates in tests/fixtures/tls,
 // which a test CA there signed for localhost and 127.0.0.1. Over TLS it can
-// offer HTTP/2, which it answers through nghttp2. Set LIBMC_LIVE_TESTS=1 to
+// offer HTTP/2, which it answers through nghttp2, and it can take mail over
+// STARTTLS or TLS from the start. Set LIBMC_LIVE_TESTS=1 to
 // also call real hosts; where the system has no bundle of trusted roots, as in
 // a bare ubuntu:24.04, that checks the roots built into libmc.
 
@@ -171,10 +173,25 @@ typedef struct TlsServer {
     HttpClient *pin;
 } TlsServer;
 
+// SmtpServer takes one mail session at a time: over TLS from the start when
+// implicit_tls, else in the clear, offering STARTTLS when starttls. It keeps
+// what it received in arena, for a test to read once server_stop has joined it.
+typedef struct SmtpServer {
+    bool implicit_tls;
+    bool starttls;
+    Arena *arena;
+    String auth;
+    String mail_from;
+    StringList recipients;
+    String data;
+} SmtpServer;
+
 typedef struct Server {
     int listener;
     String address;
     TlsServer *tls;
+    // smtp makes the server take mail instead of answering HTTP.
+    SmtpServer *smtp;
     atomic_bool stopping;
     Thread thread;
 } Server;
@@ -268,31 +285,150 @@ static void serve_http2(Connection *connection)
     nghttp2_session_del(session);
 }
 
+// tls_accept runs the server's side of a TLS handshake; the connection then reads and writes through tls.
+static bool tls_accept(TlsServer *server_tls, Connection *connection, mbedtls_ssl_context *tls)
+{
+    mbedtls_ssl_init(tls);
+    bool ready = mbedtls_ssl_setup(tls, &server_tls->config) == 0;
+    mbedtls_ssl_set_bio(tls, connection, tls_send, tls_receive, nullptr);
+    if (!ready || mbedtls_ssl_handshake(tls) != 0) {
+        mbedtls_ssl_free(tls);
+        return false;
+    }
+    connection->tls = tls;
+    return true;
+}
+
+static void tls_end(Connection *connection)
+{
+    if (connection->tls != nullptr) {
+        mbedtls_ssl_close_notify(connection->tls);
+        mbedtls_ssl_free(connection->tls);
+        connection->tls = nullptr;
+    }
+}
+
 static void serve(Server *server, int client)
 {
     Arena *arena = arena_create(0);
     Connection connection = { .fd = client };
     mbedtls_ssl_context tls;
-    bool ready = true;
-    if (server->tls != nullptr) {
-        mbedtls_ssl_init(&tls);
-        ready = mbedtls_ssl_setup(&tls, &server->tls->config) == 0;
-        mbedtls_ssl_set_bio(&tls, &connection, tls_send, tls_receive, nullptr);
-        ready = ready && mbedtls_ssl_handshake(&tls) == 0;
-        connection.tls = &tls;
-    }
-    const char *protocol = ready && server->tls != nullptr ? mbedtls_ssl_get_alpn_protocol(&tls) : nullptr;
+    bool ready = server->tls == nullptr || tls_accept(server->tls, &connection, &tls);
+    const char *protocol = connection.tls != nullptr ? mbedtls_ssl_get_alpn_protocol(&tls) : nullptr;
     if (ready && protocol != nullptr && strcmp(protocol, "h2") == 0) {
         serve_http2(&connection);
     } else if (ready) {
         connection_send(&connection, route(arena, read_request(arena, &connection)));
     }
-    if (server->tls != nullptr) {
-        mbedtls_ssl_close_notify(&tls);
-        mbedtls_ssl_free(&tls);
-    }
+    tls_end(&connection);
     net_close(client);
     arena_destroy(arena);
+}
+
+// LineReader reads CRLF-terminated lines from a connection.
+typedef struct LineReader {
+    Connection *connection;
+    char buffer[4096];
+    size_t start;
+    size_t end;
+} LineReader;
+
+static bool read_line(LineReader *reader, Arena *arena, String *line)
+{
+    StringBuilder text = str_builder_create(arena, 128);
+    for (;;) {
+        while (reader->start < reader->end) {
+            char c = reader->buffer[reader->start++];
+            if (c == '\n') {
+                *line = str_trim_suffix(str_builder_finish(&text), S("\r"));
+                return true;
+            }
+            str_builder_append_char(&text, c);
+        }
+        int got = connection_receive(reader->connection, reader->buffer, sizeof reader->buffer);
+        if (got <= 0) {
+            return false;
+        }
+        reader->start = 0;
+        reader->end = (size_t)got;
+    }
+}
+
+static void smtp_reply(Connection *connection, const char *reply)
+{
+    connection_send(connection, S(reply));
+}
+
+// read_data reads a message up to the line ".", undoing the dot stuffing.
+static String read_data(LineReader *reader, Arena *arena)
+{
+    StringBuilder data = str_builder_create(arena, 4096);
+    String line = { 0 };
+    while (read_line(reader, arena, &line) && !str_equal(line, S("."))) {
+        str_builder_append(&data, str_trim_prefix(line, S(".")));
+        str_builder_append(&data, S("\r\n"));
+    }
+    return str_builder_finish(&data);
+}
+
+// serve_smtp answers one session; AUTH is offered over TLS only, and a recipient containing "refused" is refused.
+static void serve_smtp(Server *server, int client)
+{
+    SmtpServer *smtp = server->smtp;
+    Arena *arena = smtp->arena;
+    Connection connection = { .fd = client };
+    mbedtls_ssl_context tls;
+    LineReader reader = { .connection = &connection };
+    bool ready = !smtp->implicit_tls || tls_accept(server->tls, &connection, &tls);
+    if (ready) {
+        smtp_reply(&connection, "220 libmc-test ESMTP\r\n");
+    }
+    String line = { 0 };
+    while (ready && read_line(&reader, arena, &line)) {
+        bool secure = connection.tls != nullptr;
+        if (str_starts_with(line, S("EHLO "))) {
+            smtp_reply(&connection, "250-libmc-test\r\n");
+            if (secure) {
+                smtp_reply(&connection, "250-AUTH PLAIN\r\n");
+            } else if (smtp->starttls) {
+                smtp_reply(&connection, "250-STARTTLS\r\n");
+            }
+            smtp_reply(&connection, "250 8BITMIME\r\n");
+        } else if (str_equal(line, S("STARTTLS")) && !secure && smtp->starttls) {
+            smtp_reply(&connection, "220 2.0.0 ready\r\n");
+            ready = tls_accept(server->tls, &connection, &tls);
+            reader.start = reader.end = 0;
+        } else if (str_starts_with(line, S("AUTH PLAIN")) && secure) {
+            smtp->auth = str_trim(str_trim_prefix(line, S("AUTH PLAIN")));
+            if (smtp->auth.len == 0) {
+                smtp_reply(&connection, "334 \r\n");
+                ready = read_line(&reader, arena, &smtp->auth);
+            }
+            smtp_reply(&connection, "235 2.7.0 accepted\r\n");
+        } else if (str_starts_with(line, S("MAIL FROM:"))) {
+            smtp->mail_from = str_trim_prefix(line, S("MAIL FROM:"));
+            smtp_reply(&connection, "250 2.1.0 ok\r\n");
+        } else if (str_starts_with(line, S("RCPT TO:"))) {
+            String recipient = str_trim_prefix(line, S("RCPT TO:"));
+            if (str_contains(recipient, S("refused"))) {
+                smtp_reply(&connection, "550 5.1.1 no such user\r\n");
+            } else {
+                strlist_push(arena, &smtp->recipients, recipient);
+                smtp_reply(&connection, "250 2.1.5 ok\r\n");
+            }
+        } else if (str_equal(line, S("DATA"))) {
+            smtp_reply(&connection, "354 end with a line holding a dot\r\n");
+            smtp->data = read_data(&reader, arena);
+            smtp_reply(&connection, "250 2.0.0 queued\r\n");
+        } else if (str_equal(line, S("QUIT"))) {
+            smtp_reply(&connection, "221 2.0.0 bye\r\n");
+            break;
+        } else {
+            smtp_reply(&connection, "502 5.5.2 not implemented\r\n");
+        }
+    }
+    tls_end(&connection);
+    net_close(client);
 }
 
 static void *accept_loop(void *argument)
@@ -302,7 +438,11 @@ static void *accept_loop(void *argument)
         int client = -1;
         if (net_accept(server->listener, ACCEPT_POLL_MS, &client)) {
             (void)net_set_timeouts(client, 5000, nullptr);
-            serve(server, client);
+            if (server->smtp != nullptr) {
+                serve_smtp(server, client);
+            } else {
+                serve(server, client);
+            }
         }
     }
     return nullptr;
@@ -353,6 +493,15 @@ static bool server_start(Test *test, Server *server, TlsServer *tls)
            thread_start(&server->thread, accept_loop, server, nullptr) == ERR_OK;
 }
 
+static bool smtp_server_start(Test *test, Server *server, TlsServer *tls, SmtpServer *smtp)
+{
+    *server = (Server){ .tls = tls, .smtp = smtp };
+    atomic_init(&server->stopping, false);
+    return net_listen(S("127.0.0.1:0"), &server->listener, nullptr) == ERR_OK &&
+           net_local_address(test->arena, server->listener, &server->address, nullptr) == ERR_OK &&
+           thread_start(&server->thread, accept_loop, server, nullptr) == ERR_OK;
+}
+
 static void server_stop(Server *server)
 {
     atomic_store(&server->stopping, true);
@@ -362,13 +511,13 @@ static void server_stop(Server *server)
 
 static const String LOCAL_HOSTS[] = { { "127.0.0.1", 9 }, { "localhost", 9 } };
 
-// https_url is path on the server under the name its certificate holds, localhost.
-static String https_url(Test *test, const Server *server, const char *path)
+// local_url is path on the server under the name its certificate holds, localhost.
+static String local_url(Test *test, const Server *server, const char *scheme, const char *path)
 {
     String host = { 0 };
     String port = { 0 };
     str_cut(server->address, ':', &host, &port);
-    return str_format(test->arena, "https://localhost:%.*s%s", (int)port.len, port.data, path);
+    return str_format(test->arena, "%s://localhost:%.*s%s", scheme, (int)port.len, port.data, path);
 }
 
 static HttpClient *local_client(Test *test, size_t max_response_bytes, int64_t timeout_ms)
@@ -501,7 +650,7 @@ static void http_verifies_tls_certificates(Test *test)
     HttpClient *client = local_client(test, 0, 0);
     HttpResponse response = { 0 };
     Err err = { 0 };
-    HttpRequest trusted = { .url = https_url(test, &server, "/echo") };
+    HttpRequest trusted = { .url = local_url(test, &server, "https", "/echo") };
     test_check(test, http_send(client, test->arena, &trusted, &response, &err) == ERR_OK, err.msg);
     test_check(test, response.status == 200 && str_starts_with(response.body, S("GET /echo")),
                "talks TLS to a server the CA vouches for");
@@ -530,7 +679,7 @@ static void http_speaks_http2_when_offered(Test *test)
     HttpClient *client = local_client(test, 0, 0);
     HttpResponse response = { 0 };
     Err err = { 0 };
-    HttpRequest request = { .url = https_url(test, &server, "/") };
+    HttpRequest request = { .url = local_url(test, &server, "https", "/") };
     test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK, err.msg);
     test_check(test, response.status == 200, "answers 200");
     test_check_str(test, response.body, S(HTTP2_BODY), "reads a response over HTTP/2");
@@ -588,6 +737,155 @@ static void http_reaches_live_hosts(Test *test)
     http_client_destroy(client);
 }
 
+static MailMessage short_message(const MailAddress *to)
+{
+    return (MailMessage){
+        .from = { .address = S("nora@example.no") },
+        .to = to,
+        .to_count = 1,
+        .subject = S("Et dukkehjem"),
+        .text = S("Hei"),
+    };
+}
+
+static void smtp_sends_mail_with_starttls(Test *test)
+{
+    TlsServer tls;
+    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    SmtpServer smtp = { .starttls = true, .arena = arena_create(0) };
+    Server server;
+    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    SmtpConfig config = {
+        .url = local_url(test, &server, "smtp", ""),
+        .username = S("nora"),
+        .password = S("dukkehjem"),
+        .ca_file = S(CA_FILE),
+    };
+    const MailAddress to[] = { { S("Torvald Helmer"), S("torvald@example.no") }, { .address = S("kristine@example.no") } };
+    const MailAddress cc[] = { { S("Dr. Rank"), S("rank@example.no") } };
+    const MailAddress bcc[] = { { .address = S("krogstad@example.no") } };
+    const MailAttachment attachments[] = {
+        { S("brev.txt"), S("text/plain"), S("Hello, PDF") },
+        { .filename = S("søknad.pdf"), .data = S("%PDF") },
+    };
+    MailMessage message = {
+        .from = { S("Nora Helmer"), S("nora@example.no") },
+        .to = to,
+        .to_count = countof(to),
+        .cc = cc,
+        .cc_count = countof(cc),
+        .bcc = bcc,
+        .bcc_count = countof(bcc),
+        .subject = S("Søknad om ferie"),
+        .text = S("Hei\nlinje to"),
+        .html = S("<p>Hei</p>"),
+        .attachments = attachments,
+        .attachment_count = countof(attachments),
+    };
+    Err err = { 0 };
+    test_check(test, smtp_send(&config, &message, &err) == ERR_OK, err.msg);
+    server_stop(&server);
+    String data = smtp.data;
+    test_check_str(test, smtp.auth, S("AG5vcmEAZHVra2VoamVt"), "signs in with PLAIN after STARTTLS");
+    test_check_str(test, smtp.mail_from, S("<nora@example.no>"), "the envelope sender");
+    test_check_str(test, str_join(test->arena, smtp.recipients, S(" ")),
+                   S("<torvald@example.no> <kristine@example.no> <rank@example.no> <krogstad@example.no>"),
+                   "every recipient, bcc included");
+    test_check(test, str_contains(data, S("From: \"Nora Helmer\" <nora@example.no>\r\n")), "the From header");
+    test_check(test, str_contains(data, S("To: \"Torvald Helmer\" <torvald@example.no>,\r\n kristine@example.no\r\n")),
+               "the To header, folded between mailboxes");
+    test_check(test, str_contains(data, S("Cc: \"Dr. Rank\" <rank@example.no>\r\n")), "the Cc header");
+    test_check(test, !str_contains(data, S("krogstad")), "bcc is not named in the message");
+    test_check(test, str_contains(data, S("Subject: =?UTF-8?Q?S=C3=B8knad_om_ferie?=\r\n")), "a UTF-8 subject");
+    test_check(test, str_contains(data, S("Date: ")) && str_contains(data, S("Message-ID: <")), "Date and Message-ID");
+    test_check(test, str_contains(data, S("multipart/alternative")) && str_contains(data, S("Hei\r\nlinje to\r\n")) &&
+                         str_contains(data, S("<p>Hei</p>")),
+               "the text and HTML as alternatives");
+    test_check(test, str_contains(data, S("filename=\"brev.txt\"")) && str_contains(data, S("SGVsbG8sIFBERg==")),
+               "an attachment in base64");
+    test_check(test, str_contains(data, S("filename*=UTF-8''s%C3%B8knad.pdf")), "a UTF-8 file name");
+    tls_server_destroy(&tls);
+    arena_destroy(smtp.arena);
+}
+
+static void smtp_sends_mail_over_tls_from_the_start(Test *test)
+{
+    TlsServer tls;
+    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    SmtpServer smtp = { .implicit_tls = true, .arena = arena_create(0) };
+    Server server;
+    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    SmtpConfig config = { .url = local_url(test, &server, "smtps", ""), .ca_file = S(CA_FILE) };
+    const MailAddress to[] = { { .address = S("torvald@example.no") } };
+    MailMessage message = short_message(to);
+    Err err = { 0 };
+    test_check(test, smtp_send(&config, &message, &err) == ERR_OK, err.msg);
+    server_stop(&server);
+    test_check(test, str_contains(smtp.data, S("Subject: Et dukkehjem\r\n")), "delivers the message");
+    tls_server_destroy(&tls);
+    arena_destroy(smtp.arena);
+}
+
+static void smtp_refuses_servers_without_starttls(Test *test)
+{
+    TlsServer tls;
+    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    SmtpServer smtp = { .arena = arena_create(0) };
+    Server server;
+    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    SmtpConfig config = {
+        .url = local_url(test, &server, "smtp", ""),
+        .username = S("nora"),
+        .password = S("dukkehjem"),
+        .ca_file = S(CA_FILE),
+    };
+    const MailAddress to[] = { { .address = S("torvald@example.no") } };
+    MailMessage message = short_message(to);
+    test_check(test, smtp_send(&config, &message, nullptr) == ERR_NETWORK, "a server that offers no STARTTLS");
+    server_stop(&server);
+    test_check(test, smtp.auth.len == 0 && smtp.mail_from.len == 0, "sends neither the password nor the mail");
+    tls_server_destroy(&tls);
+    arena_destroy(smtp.arena);
+}
+
+static void smtp_reports_a_refused_recipient(Test *test)
+{
+    TlsServer tls;
+    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    SmtpServer smtp = { .starttls = true, .arena = arena_create(0) };
+    Server server;
+    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    SmtpConfig config = { .url = local_url(test, &server, "smtp", ""), .ca_file = S(CA_FILE) };
+    const MailAddress to[] = { { .address = S("refused@example.no") } };
+    MailMessage message = short_message(to);
+    Err err = { 0 };
+    test_check(test, smtp_send(&config, &message, &err) == ERR_NETWORK, "the server refuses the recipient");
+    test_check(test, str_contains(S(err.msg), S("550")), err.msg);
+    server_stop(&server);
+    tls_server_destroy(&tls);
+    arena_destroy(smtp.arena);
+}
+
+static void smtp_rejects_malformed_messages(Test *test)
+{
+    SmtpConfig config = { .url = S("smtp://localhost:1"), .ca_file = S(CA_FILE) };
+    const MailAddress to[] = { { .address = S("torvald@example.no") } };
+    MailMessage message = short_message(to);
+    message.subject = S("Hei\r\nBcc: krogstad@example.no");
+    test_check(test, smtp_send(&config, &message, nullptr) == ERR_INVALID_ARGUMENT, "a line break in the subject");
+    message = short_message(to);
+    message.from.address = S("nora");
+    test_check(test, smtp_send(&config, &message, nullptr) == ERR_INVALID_ARGUMENT, "an address without @");
+    message = short_message(to);
+    message.to_count = 0;
+    test_check(test, smtp_send(&config, &message, nullptr) == ERR_INVALID_ARGUMENT, "no recipients");
+    message = short_message(to);
+    SmtpConfig http = { .url = S("http://localhost:1/"), .ca_file = S(CA_FILE) };
+    test_check(test, smtp_send(&http, &message, nullptr) == ERR_INVALID_ARGUMENT, "a URL that is not SMTP");
+    SmtpConfig missing = { .url = S("smtp://localhost:1"), .ca_file = S("tests/fixtures/tls/missing.pem") };
+    test_check(test, smtp_send(&missing, &message, nullptr) == ERR_NOT_FOUND, "a missing CA bundle");
+}
+
 const TestCase HTTP_TESTS[] = {
     { "http_sends_requests_and_reads_responses", http_sends_requests_and_reads_responses },
     { "http_follows_redirects_within_the_rules", http_follows_redirects_within_the_rules },
@@ -596,5 +894,14 @@ const TestCase HTTP_TESTS[] = {
     { "http_speaks_http2_when_offered", http_speaks_http2_when_offered },
     { "http_decodes_compressed_responses", http_decodes_compressed_responses },
     { "http_reaches_live_hosts", http_reaches_live_hosts },
+    { nullptr, nullptr },
+};
+
+const TestCase SMTP_TESTS[] = {
+    { "smtp_sends_mail_with_starttls", smtp_sends_mail_with_starttls },
+    { "smtp_sends_mail_over_tls_from_the_start", smtp_sends_mail_over_tls_from_the_start },
+    { "smtp_refuses_servers_without_starttls", smtp_refuses_servers_without_starttls },
+    { "smtp_reports_a_refused_recipient", smtp_reports_a_refused_recipient },
+    { "smtp_rejects_malformed_messages", smtp_rejects_malformed_messages },
     { nullptr, nullptr },
 };
