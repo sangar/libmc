@@ -1,5 +1,9 @@
 # name version url hash
-cyaml 0.1.3-7fb5b32 https://github.com/andrewmd5/cyaml sha256:ddbb32a881e9da28fe003a063bae208507ee773b709ed65a2b14be84f9b276d6
-yyjson 0.13.0 https://github.com/ibireme/yyjson sha256:36532ba75b7ff6ce609567474b7e8fa5bb9ab3466deba8eb5ec913d522384c1d
+cyaml 0.1.3-7fb5b32 https://github.com/sangar/libmc/releases/download/deps-cyaml-0.1.3-7fb5b32/cyaml-0.1.3-7fb5b32.tar.gz sha256:ddbb32a881e9da28fe003a063bae208507ee773b709ed65a2b14be84f9b276d6
+yyjson 0.13.0 https://github.com/sangar/libmc/releases/download/deps-yyjson-0.13.0/yyjson-0.13.0.tar.gz sha256:36532ba75b7ff6ce609567474b7e8fa5bb9ab3466deba8eb5ec913d522384c1d
+mbedtls 4.1.1 https://github.com/sangar/libmc/releases/download/deps-mbedtls-4.1.1/mbedtls-4.1.1.tar.gz sha256:f2543b31b6cec0ddb535806bb343da2446428f5e105ae4a5128d622bef3aea77
+curl 8.23.0 https://github.com/sangar/libmc/releases/download/deps-curl-8.23.0/curl-8.23.0.tar.gz sha256:9c7cb181863ba51f5c868ba73d6fd3b111996a819fee20793f8062603195601d
 # utf8proc: utf8proc_data.c is vendored as utf8proc_data.inc, and utf8proc.c includes it by that name, so every deps/*/*.c is a translation unit.
-utf8proc 2.12.0 https://github.com/JuliaStrings/utf8proc sha256:c86be2546ddff67bbf80501fd026895a39ef6a61d1482553c3ce30752016d522
+utf8proc 2.12.0 https://github.com/sangar/libmc/releases/download/deps-utf8proc-2.12.0/utf8proc-2.12.0.tar.gz sha256:c86be2546ddff67bbf80501fd026895a39ef6a61d1482553c3ce30752016d522
+nghttp2 1.70.0 https://github.com/sangar/libmc/releases/download/deps-nghttp2-1.70.0/nghttp2-1.70.0.tar.gz sha256:add70515c0c9b114a90a70a4450719edafad3bc81efd1365c1383274e6db58a0
+zlib 1.3.2 https://github.com/sangar/libmc/releases/download/deps-zlib-1.3.2/zlib-1.3.2.tar.gz sha256:d29a906ad18cf40efb4556b9231cdd69e0f20a10b188ba060b27600791ddd212
