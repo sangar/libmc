@@ -24,8 +24,9 @@ esac
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# COPYFILE_DISABLE keeps macOS tar from adding ._ files, which would change the hash.
-COPYFILE_DISABLE=1 tar --exclude .DS_Store -czf "$work/$asset" -C deps "$name"
+# COPYFILE_DISABLE and --no-xattrs keep macOS tar from adding ._ files, which would change the hash, and
+# extended attributes, which GNU tar warns about.
+COPYFILE_DISABLE=1 tar --no-xattrs --exclude .DS_Store -czf "$work/$asset" -C deps "$name"
 mkdir "$work/unpacked"
 tar -xzf "$work/$asset" -C "$work/unpacked"
 # The hash is the last line: ./nob prints its own rebuild first when tools/build.c changed.
