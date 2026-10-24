@@ -124,7 +124,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/core/error.h` | `Error`, `Err`, `err_set`, `err_wrap`, `error_name` |
 | | `mc/core/arena.h` | Block arena, mark/release, `arena_grow` for dynamic arrays |
 | text | `mc/text/str.h` | `String`, `StringList`, `StringBuilder` |
-| | `mc/text/utf8.h` | UTF-8 decode, encode, validate and count |
+| | `mc/text/utf8.h` | UTF-8 decode, encode, validate, count and terminal width |
 | | `mc/text/unicode.h` | NFC normalization, Unicode upper and lower case, case-insensitive equality, Danish and Norwegian sort order, on utf8proc |
 | | `mc/text/glob.h` | Glob matching with `**` and character classes |
 | | `mc/text/path.h` | Lexical path handling: join, clean, base, dir, ext, relative |

@@ -48,6 +48,23 @@ static void utf8_converts_latin1(Test *test)
     test_check(test, converted.data[converted.len] == '\0', "the result is NUL-terminated");
 }
 
+static void utf8_measures_terminal_columns(Test *test)
+{
+    test_check(test, utf8_width(S("note.txt")) == 8, "ascii takes a column a character");
+    test_check(test, utf8_width(S("blåbær")) == 6, "precomposed latin letters take one column");
+    test_check(test, utf8_width(S("cafe\xCC\x81")) == 4, "a combining accent takes none");
+    test_check(test, utf8_width(S("日本語")) == 6, "CJK ideographs take two columns");
+    test_check(test, utf8_width(S("\xE3\x81\x8B\xE3\x82\x99")) == 2, "a decomposed voicing mark takes none");
+    test_check(test, utf8_width(S("🎉x")) == 3, "emoji take two columns");
+    test_check(test, utf8_width(S("\xE2\x9D\xA4\xEF\xB8\x8F")) == 1, "a variation selector takes none");
+    test_check(test, utf8_width(S("a\tb\x1B[31m")) == 6, "controls take none");
+    test_check(test, utf8_width((String){ "\xFF", 1 }) == 1, "a malformed byte counts as U+FFFD");
+    test_check(test, utf8_codepoint_width(0x3000) == 2 && utf8_codepoint_width(0x3099) == 0,
+               "zero width wins inside a wide block");
+    test_check(test, utf8_codepoint_width(0x2FFFD) == 2 && utf8_codepoint_width(0x10FFFF) == 1,
+               "the supplementary ideographic plane is wide, the last code point is not");
+}
+
 static void unicode_normalizes_and_cases(Test *test)
 {
     Arena *a = test->arena;
@@ -346,6 +363,7 @@ static void sigv4_signs_like_aws(Test *test)
 const TestCase TEXT_TESTS[] = {
     { "utf8_roundtrip_and_validation", utf8_roundtrip_and_validation },
     { "utf8_converts_latin1", utf8_converts_latin1 },
+    { "utf8_measures_terminal_columns", utf8_measures_terminal_columns },
     { "unicode_normalizes_and_cases", unicode_normalizes_and_cases },
     { "unicode_sorts_norwegian", unicode_sorts_norwegian },
     { "glob_matches_paths", glob_matches_paths },
