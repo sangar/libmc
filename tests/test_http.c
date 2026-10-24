@@ -16,7 +16,8 @@
 // process, over plain HTTP or TLS with the certificates in tests/fixtures/tls,
 // which a test CA there signed for localhost and 127.0.0.1. Over TLS it can
 // offer HTTP/2, which it answers through nghttp2. Set LIBMC_LIVE_TESTS=1 to
-// also call real hosts.
+// also call real hosts; where the system has no bundle of trusted roots, as in
+// a bare ubuntu:24.04, that checks the roots built into libmc.
 
 static const char CA_FILE[] = "tests/fixtures/tls/ca.pem";
 static const char SERVER_CERT_FILE[] = "tests/fixtures/tls/server.pem";
