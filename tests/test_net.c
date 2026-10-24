@@ -528,9 +528,19 @@ static bool ftp_open_data(FtpSession *session, Connection *data, mbedtls_ssl_con
     return !session->protect || tls_accept(session->server->tls, data, tls);
 }
 
+// ftp_close_data waits for the client's close_notify after sending its own,
+// since curl ends a download that way and fails it when the connection is
+// reset, as it is when the server closes before that close_notify arrives.
 static void ftp_close_data(FtpSession *session, Connection *data)
 {
-    tls_end(data);
+    if (data->tls != nullptr) {
+        mbedtls_ssl_close_notify(data->tls);
+        char rest[256];
+        while (connection_receive(data, rest, sizeof rest) > 0) {
+        }
+        mbedtls_ssl_free(data->tls);
+        data->tls = nullptr;
+    }
     if (data->fd >= 0) {
         net_close(data->fd);
     }
