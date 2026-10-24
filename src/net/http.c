@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 #include <string.h>
 
+#include "cacert.h"
 #include "mc/platform/platform.h"
 
 enum {
@@ -27,6 +28,7 @@ struct HttpClient {
     // arena holds the copy of the configuration.
     Arena *arena;
     HttpClientConfig config;
+    // ca_file is null where the system has no bundle; Mozilla's roots, built in, are used instead.
     const char *ca_file;
     const char *user_agent;
 };
@@ -53,7 +55,7 @@ static HttpClientConfig with_defaults(HttpClientConfig config)
 Error http_client_create(const HttpClientConfig *config, HttpClient **client, Err *err)
 {
     String ca_file = config->ca_file.len > 0 ? config->ca_file : http_default_ca_file();
-    if (ca_file.len == 0 || !file_exists(ca_file)) {
+    if (ca_file.len > 0 && !file_exists(ca_file)) {
         return err_set(err, ERR_NOT_FOUND, "http: no bundle of trusted roots at %.*s",
                        (int)ca_file.len, ca_file.data);
     }
@@ -71,7 +73,7 @@ Error http_client_create(const HttpClientConfig *config, HttpClient **client, Er
         .curl = curl,
         .arena = arena,
         .config = with_defaults(*config),
-        .ca_file = str_cstr(arena, ca_file),
+        .ca_file = ca_file.len > 0 ? str_cstr(arena, ca_file) : nullptr,
         .user_agent = str_cstr(arena, config->user_agent),
     };
     String *hosts = arena_push(arena, sizeof(String) * (config->allowed_host_count + 1));
@@ -227,7 +229,12 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
     const char *protocols = client->config.allow_plain_http ? "http,https" : "https";
     curl_easy_setopt(curl, CURLOPT_URL, hop_request->url);
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, protocols);
-    curl_easy_setopt(curl, CURLOPT_CAINFO, client->ca_file);
+    if (client->ca_file != nullptr) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, client->ca_file);
+    } else {
+        struct curl_blob roots = { .data = (void *)CACERT_PEM, .len = CACERT_PEM_SIZE, .flags = CURL_BLOB_NOCOPY };
+        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &roots);
+    }
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)client->config.connect_timeout_ms);

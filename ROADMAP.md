@@ -8,12 +8,11 @@ Checked on 2026-10-24
 
 ## Focus
 
-libmc is in use by projects under the `modern-c` contract, such as dbox and bprocs, and is where they get shared code. JSON, YAML and CSV are in. What moves it forward now are the pieces those projects reach for next, in this order:
+libmc is in use by projects under the `modern-c` contract, such as dbox and bprocs, and is where they get shared code. JSON, YAML, CSV and the HTTP client are in. What moves it forward now are the pieces those projects reach for next, in this order:
 
-1. **The HTTP client:** HTTPS through curl on mbedTLS, HTTP/2, compressed responses and green builds on all three platforms, all on the `http-client` branch. See [HTTP client](#http-client).
-2. **Markdown and XML:** rendering Markdown and reading XML, the two formats projects use most that libmc lacks. See [Markdown and XML](#markdown-and-xml).
-3. **Mail and file transfer:** sending mail over SMTP and moving files over FTP, both through the curl libmc already pins. See [Mail and file transfer](#mail-and-file-transfer).
-4. **SSH and SFTP:** waits for libssh2 to build with mbedTLS 4. See [SSH and SFTP](#ssh-and-sftp).
+1. **Markdown and XML:** rendering Markdown and reading XML, the two formats projects use most that libmc lacks. See [Markdown and XML](#markdown-and-xml).
+2. **Mail and file transfer:** sending mail over SMTP and moving files over FTP, both through the curl libmc already pins. See [Mail and file transfer](#mail-and-file-transfer).
+3. **SSH and SFTP:** waits for libssh2 to build with mbedTLS 4. See [SSH and SFTP](#ssh-and-sftp).
 
 Small items, such as the unmerged commits on `terminal-width` and `unicode-text`, wait unless they block one of these.
 
@@ -27,32 +26,28 @@ Small items, such as the unmerged commits on `terminal-width` and `unicode-text`
 
 ## Where we are
 
-`master` is at `e8ddf93` from 23 October 2026, with the CSV reader (PR #17) and NFC, Unicode case and Norwegian sort order on utf8proc (PR #18) merged. The HTTP client is uncommitted work on `http-client`, on top of `master`.
+`master` is at `9b80f1b` from 24 October 2026, with the HTTP client (PR #19) merged. Mozilla's trusted roots for systems without their own are on `trusted-roots`.
 
 | Branch | State | Last commit | Tests |
 |---|---|---|---|
-| `master` | Merged | `e8ddf93`, 23 Oct 2026, PR #18 | Not run for this file |
-| `http-client` | Uncommitted, on top of `master` | Based on `e8ddf93` | `./nob check` (no findings, 684 checks), `./nob release` and `./nob cross` pass on macOS; `CC=gcc-14 ./nob test` passes in `ubuntu:24.04` on aarch64 |
+| `master` | Merged | `9b80f1b`, 24 Oct 2026, PR #19 | GitHub CI passes on macOS, Linux x86_64 and aarch64 with clang 18 and gcc 14, and the cross builds |
+| `trusted-roots` | Not merged | On top of `9b80f1b` | `./nob test` passes on macOS; in `ubuntu:24.04` without `ca-certificates`, `LIBMC_LIVE_TESTS=1` reaches three live hosts through the built-in roots |
 | `unicode-text` | One commit not merged, pushed, no pull request | `08e7868`, "Allow the deliberate ASCII ignore-case calls" | Not run |
 | `terminal-width` | One commit not merged, local only | `b30d282`, "Measure the terminal width of UTF-8 text" | Not run |
 
 On 24 October 2026 dependencies stopped being committed. curl and mbedTLS would have added 13.7 MB of source, 5.5 MB in git, to every clone and to every project that pins libmc. `deps.lock` now pins each dependency by content hash, the build fetches it, and cyaml, yyjson, utf8proc, mbedTLS, curl, nghttp2 and zlib are published as `deps-*` releases.
 
+The first GitHub CI run of the HTTP client failed on Linux, where it had passed locally. The test's HTTP/2 server closed the connection with the client's last frames unread, and Linux then resets the connection, discarding the response. Keeping the connection open until the client closes it showed a second fault: destroying the last `HttpClient` frees mbedTLS's crypto state, which the test server shares, so the TLS test server now holds an `HttpClient` of its own.
+
 ## HTTP client
 
-Now, on `http-client`. Projects call web APIs, such as S3 through libmc's SigV4 signing, and need one client that is safe by default. The bar is Go's `net/http`: its default transport uses HTTP/2 over HTTPS without being asked and decodes compressed responses itself, so a caller sees the original only by setting `Transport.DisableCompression`. A libmc caller gets the same without setting anything. It is done when a project calls an API through `http_send` on macOS and both Linux targets.
+Done. Merged on 24 October 2026 through PR #19: `mc/net/http.h` on curl and mbedTLS, with HTTP/2 through nghttp2 and gzip and deflate through zlib, on macOS and both Linux targets. The bar was Go's `net/http`, which uses HTTP/2 and decodes compressed responses without being asked; a libmc caller gets the same.
 
-- [x] **Builds on top of `master`.** Rebased onto `e8ddf93` on 24 October 2026; utf8proc 2.12.0 is published as `deps-utf8proc-2.12.0` and fetched like the others.
-- [x] **Builds and tests pass on Linux and in the macOS cross build.** Fixed on 24 October 2026: curl compiles with `_GNU_SOURCE` on Linux, as its CMake does, for `accept4` and `memrchr`; the macOS cross build finds the two SystemConfiguration calls curl makes in `src/net/curl/macos/sdk/`, searched after the SDK; and the compiler fingerprint no longer passes the glibc version to `zig cc --version`.
-- [x] **HTTP/2 when the server offers it.** Done on 24 October 2026 with nghttp2 1.70.0, pinned as `deps-nghttp2-1.70.0`, and `USE_NGHTTP2` in both `curl_config.h` files. The test server offers `h2` over TLS and answers through nghttp2's server API. With one request at a time per `HttpClient`, the gain is header compression and fewer connections; requests on one connection at once wait for a concurrent API.
-- [x] **Compressed responses decoded.** Done on 24 October 2026 with zlib 1.3.2, pinned as `deps-zlib-1.3.2`. The client asks for gzip and deflate, and `max_response_bytes` counts the decoded body: a 96-byte gzip response that decodes to 64 KiB fails at a 1 KiB limit.
-- [ ] **Merged.**
-      1. [x] **Documented,** on 24 October 2026: the README module table and `modern-c` rule 11's have `mc/net/http.h`, and both name the macOS frameworks HTTP needs, SystemConfiguration and CoreFoundation.
-      2. [ ] **Merged through a pull request.**
+- [x] **Trusted roots in minimal containers.** `ubuntu:24.04` has no bundle of trusted roots, so every request failed until `ca-certificates` was installed. Mozilla's roots, from curl's extract of 20 October 2026, are pinned as `deps-cacert-2026-10-20` and built into libmc, and the client uses them where `ca_file` is empty and the system has no bundle, as Go's `x509roots/fallback` does. `tools/cacert.sh` writes a newer extract into `deps/cacert`.
 
 ## Markdown and XML
 
-After the HTTP client, each on its own branch. JSON, YAML and CSV are in libmc; Markdown and XML are the formats projects use most that it lacks.
+Next, each on its own branch. JSON, YAML and CSV are in libmc; Markdown and XML are the formats projects use most that it lacks.
 
 - [ ] **Render Markdown to HTML.** md4c (MIT) passes the CommonMark 0.31.2 compliance tests and supports GitHub's tables, task lists, strikethrough and autolinks, which is what people expect from Markdown since GitHub. `mc/encoding/markdown.h` on a branch `markdown`. Raw HTML in Markdown from users lets them inject scripts, so it is off by default, with `MD_FLAG_NOHTMLSPANS` and `MD_FLAG_NOHTMLBLOCKS`, and a caller turns it on for trusted text.
       1. [ ] A decision report, md4c against cmark-gfm, approved.
@@ -101,5 +96,4 @@ After mail and file transfer, and blocked. curl speaks SSH and SFTP through libs
 
 ## Open questions
 
-- **Trusted roots in minimal containers.** `ubuntu:24.04` has no CA bundle, so `http_client_create` fails with "no bundle of trusted roots at " and an empty path, and the fix today is `apt install ca-certificates`. Leaning: pin curl's copy of Mozilla's bundle, `cacert.pem`, use it only when the system has none, and make the error name the fix. To be decided before the HTTP client merges.
 - **XML as events or as a tree.** Leaning: events first. Decided by the first project that reads XML.
