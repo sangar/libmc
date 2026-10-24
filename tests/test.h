@@ -49,6 +49,7 @@ extern const TestCase SYSINFO_TESTS[];
 extern const TestCase HTTP_TESTS[];
 extern const TestCase SMTP_TESTS[];
 extern const TestCase S3_TESTS[];
+extern const TestCase FTP_TESTS[];
 extern const AbortCase ABORT_CASES[];
 
 // Abort cases that live with the tests that run them.

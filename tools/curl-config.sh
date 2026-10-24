@@ -1,9 +1,10 @@
 #!/bin/sh
 # Generates src/net/curl/<os>/curl_config.h, curl's configuration for this
 # system: HTTP/1.1 and HTTP/2 over HTTPS, with gzip and deflate responses,
-# and mail over SMTPS or STARTTLS with MIME messages, on the mbedTLS, nghttp2
-# and zlib in deps/. Run it from the repository root with an unpacked curl release of the version in deps.lock, on
-# macOS for macos and in ubuntu:24.04 (glibc 2.39) for linux:
+# mail over SMTPS or STARTTLS with MIME messages, and files over FTPS, on the
+# mbedTLS, nghttp2 and zlib in deps/. Run it from the repository root with an
+# unpacked curl release of the version in deps.lock, on macOS for macos and
+# in ubuntu:24.04 (glibc 2.39) for linux:
 #
 #     tools/curl-config.sh ~/Downloads/curl-8.23.0 macos
 #
@@ -39,7 +40,7 @@ done
 ar rcs "$work/libz.a" "$work"/zlib/*.o
 
 off=""
-for feature in DICT FILE FTP GOPHER IMAP LDAP LDAPS MQTT POP3 RTSP TELNET TFTP IPFS WEBSOCKETS \
+for feature in DICT FILE GOPHER IMAP LDAP LDAPS MQTT POP3 RTSP TELNET TFTP IPFS WEBSOCKETS \
                NETRC KERBEROS_AUTH NEGOTIATE_AUTH AWS DOH PROXY BINDLOCAL CA_SEARCH FORM_API \
                COOKIES ALTSVC HSTS HTTPSIG; do
   off="$off -DCURL_DISABLE_$feature=ON"
