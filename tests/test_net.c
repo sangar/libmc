@@ -12,6 +12,7 @@
 #include "mc/net/http.h"
 #include "mc/net/smtp.h"
 #include "mc/platform/platform.h"
+#include "mc/text/path.h"
 
 // The tests run the clients against a server on 127.0.0.1 in a thread of this
 // process, over plain HTTP or TLS with the certificates in tests/fixtures/tls,
@@ -614,6 +615,9 @@ static void http_enforces_limits(Test *test)
                "a body over the limit, by its Content-Length");
     test_check(test, send_to(test, client, &server, "GET", "/large-chunked", S(""), &response, &err) == ERR_UNSUPPORTED,
                "a chunked body that grows over the limit");
+    test_check(test, send_to(test, client, &server, "HEAD", "/large", S(""), &response, &err) == ERR_OK &&
+                         response.status == 200,
+               "a HEAD whose Content-Length is over the limit");
     test_check(test, send_to(test, client, &server, "GET", "/slow", S(""), &response, &err) == ERR_TIMEOUT,
                "a response slower than the timeout");
     test_check(test, send_to(test, client, &server, "BREW", "/echo", S(""), &response, &err) == ERR_INVALID_ARGUMENT,
@@ -702,6 +706,119 @@ static void http_decodes_compressed_responses(Test *test)
     test_check_str(test, response.body, S("hello, gzip"), "decodes a gzip body");
     test_check(test, send_to(test, client, &server, "GET", "/gzip-large", S(""), &response, &err) == ERR_UNSUPPORTED,
                "a small gzip body that decodes to more than the limit");
+    http_client_destroy(client);
+    server_stop(&server);
+}
+
+static String file_contents(Test *test, String path)
+{
+    String contents = { 0 };
+    return file_read_all(test->arena, path, &contents, nullptr) == ERR_OK ? contents : S("<unreadable>");
+}
+
+static void http_streams_bodies_through_files(Test *test)
+{
+    Server server;
+    test_check(test, server_start(test, &server, nullptr), "starts the server");
+    HttpClient *client = local_client(test, 1024, 0);
+    HttpResponse response = { 0 };
+    Err err = { 0 };
+    String dir = { 0 };
+    test_check(test, dir_create_temp(test->arena, S("mc-http-"), &dir, &err) == ERR_OK, err.msg);
+    String source_path = path_join(test->arena, dir, S("source"));
+    test_check(test, file_write_all(source_path, S("0123456789"), 0600, &err) == ERR_OK, err.msg);
+    int source = -1;
+    test_check(test, file_open_read(source_path, &source, &err) == ERR_OK, err.msg);
+
+    HttpFileBody part = { .fd = source, .offset = 2, .length = 5 };
+    HttpRequest put = { .method = S("PUT"), .url = str_format(test->arena, "http://%.*s/echo", (int)server.address.len,
+                                                             server.address.data),
+                        .body_file = &part };
+    test_check(test, http_send(client, test->arena, &put, &response, &err) == ERR_OK, err.msg);
+    test_check(test, str_starts_with(response.body, S("PUT /echo")), "sends the method");
+    test_check(test, str_contains(response.body, S("Content-Length: 5")), "declares the range's length");
+    test_check(test, str_ends_with(response.body, S("\r\n\r\n23456")), "sends the range of the file");
+
+    put.method = S("POST");
+    put.url = str_format(test->arena, "http://%.*s/temporary", (int)server.address.len, server.address.data);
+    test_check(test, http_send(client, test->arena, &put, &response, &err) == ERR_OK, err.msg);
+    test_check(test, str_starts_with(response.body, S("POST /echo")) && str_ends_with(response.body, S("23456")),
+               "a 307 sends the file again");
+
+    String sink_path = path_join(test->arena, dir, S("sink"));
+    int sink = -1;
+    test_check(test, file_create(sink_path, 0600, &sink, &err) == ERR_OK, err.msg);
+    HttpDownload download = { .fd = sink };
+    HttpRequest get = { .url = str_format(test->arena, "http://%.*s/large", (int)server.address.len, server.address.data),
+                        .download = &download };
+    test_check(test, http_send(client, test->arena, &get, &response, &err) == ERR_OK, err.msg);
+    test_check(test, response.status == 200 && response.body.len == 0 && response.downloaded == 4096,
+               "a download past max_response_bytes goes to the file");
+    test_check_str(test, file_contents(test, sink_path), str_repeat(test->arena, S("x"), 4096), "the file holds the body");
+
+    test_check(test, file_truncate(sink, 0, &err) == ERR_OK && file_seek(sink, 0, &err) == ERR_OK, err.msg);
+    get.url = str_format(test->arena, "http://%.*s/unavailable", (int)server.address.len, server.address.data);
+    test_check(test, http_send(client, test->arena, &get, &response, &err) == ERR_OK, err.msg);
+    test_check(test, response.status == 503 && str_equal(response.body, S("try later")) && response.downloaded == 0,
+               "an error status keeps its body in memory");
+    test_check_str(test, file_contents(test, sink_path), S(""), "and leaves the file alone");
+
+    file_close(sink);
+    file_close(source);
+    (void)file_remove(sink_path, nullptr);
+    (void)file_remove(source_path, nullptr);
+    (void)dir_remove(dir, nullptr);
+    http_client_destroy(client);
+    server_stop(&server);
+}
+
+typedef struct DelayedCancel {
+    Cancel *cancel;
+    int64_t delay_ms;
+} DelayedCancel;
+
+static void *cancel_later(void *argument)
+{
+    DelayedCancel *delayed = argument;
+    clock_sleep_ms(delayed->delay_ms);
+    cancel_request(delayed->cancel);
+    return nullptr;
+}
+
+static void http_cancels_and_times_out_per_request(Test *test)
+{
+    Server server;
+    test_check(test, server_start(test, &server, nullptr), "starts the server");
+    HttpClient *client = local_client(test, 0, 200);
+    HttpResponse response = { 0 };
+    Err err = { 0 };
+    String slow = str_format(test->arena, "http://%.*s/slow", (int)server.address.len, server.address.data);
+    HttpRequest request = { .url = slow, .timeout_ms = 5000 };
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK && response.status == 200,
+               "a request's own timeout outlasts the client's");
+    request.timeout_ms = -1;
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK, "a request without a timeout");
+
+    Cancel cancel;
+    cancel_init(&cancel);
+    request.cancel = &cancel;
+    DelayedCancel delayed = { .cancel = &cancel, .delay_ms = 100 };
+    Thread canceller;
+    test_check(test, thread_start(&canceller, cancel_later, &delayed, nullptr) == ERR_OK, "starts the canceller");
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_CANCELLED, "cancelled mid-request");
+    thread_join(&canceller);
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_CANCELLED,
+               "a request on a cancelled token does not start");
+    cancel_destroy(&cancel);
+
+    // The server gzips /gzip whatever is asked; a caller that sets Accept-Encoding gets those bytes as sent.
+    const HttpHeader identity[] = { { S("Accept-Encoding"), S("identity") } };
+    HttpRequest raw = { .url = str_format(test->arena, "http://%.*s/gzip", (int)server.address.len, server.address.data),
+                        .headers = identity,
+                        .header_count = countof(identity) };
+    test_check(test, http_send(client, test->arena, &raw, &response, &err) == ERR_OK, err.msg);
+    test_check(test, str_equal(response.body, (String){ (const char *)GZIP_HELLO, sizeof GZIP_HELLO }),
+               "a body the caller did not ask to decode stays encoded");
     http_client_destroy(client);
     server_stop(&server);
 }
@@ -893,6 +1010,8 @@ const TestCase HTTP_TESTS[] = {
     { "http_verifies_tls_certificates", http_verifies_tls_certificates },
     { "http_speaks_http2_when_offered", http_speaks_http2_when_offered },
     { "http_decodes_compressed_responses", http_decodes_compressed_responses },
+    { "http_streams_bodies_through_files", http_streams_bodies_through_files },
+    { "http_cancels_and_times_out_per_request", http_cancels_and_times_out_per_request },
     { "http_reaches_live_hosts", http_reaches_live_hosts },
     { nullptr, nullptr },
 };
