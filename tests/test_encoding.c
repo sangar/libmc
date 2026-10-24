@@ -7,6 +7,7 @@
 #include "mc/encoding/dotenv.h"
 #include "mc/encoding/json.h"
 #include "mc/encoding/markdown.h"
+#include "mc/encoding/xml.h"
 #include "mc/encoding/yaml.h"
 #include "mc/platform/platform.h"
 
@@ -468,6 +469,94 @@ static void markdown_keeps_html_and_scripts_out(Test *test)
                    S("<p>a <b>b</b></p>\n<p><a href=\"javascript:go()\">a</a></p>\n"), "allow_html passes both");
 }
 
+// xml_outline writes the events of text as <name a="v"> for a start, </name> for an end and [text] for text.
+static String xml_outline(Test *test, String text)
+{
+    XmlEvents events = { 0 };
+    Err err = { 0 };
+    test_check(test, xml_parse(test->arena, text, &events, &err) == ERR_OK, err.msg);
+    StringBuilder out = str_builder_create(test->arena, 64);
+    for (size_t i = 0; i < events.count; i++) {
+        const XmlEvent *event = &events.items[i];
+        switch (event->kind) {
+        case XML_EVENT_START:
+            str_builder_append_format(&out, "<%s", event->name.data);
+            for (size_t a = 0; a < event->attribute_count; a++) {
+                str_builder_append_format(&out, " %s=\"%s\"", event->attributes[a].name.data,
+                                          event->attributes[a].value.data);
+            }
+            str_builder_append_char(&out, '>');
+            break;
+        case XML_EVENT_END:
+            str_builder_append_format(&out, "</%s>", event->name.data);
+            break;
+        case XML_EVENT_TEXT:
+            str_builder_append_format(&out, "[%s]", event->text.data);
+            break;
+        }
+    }
+    return str_builder_finish(&out);
+}
+
+static void xml_reads_elements_attributes_and_text(Test *test)
+{
+    test_check_str(test,
+                   xml_outline(test, S("<?xml version=\"1.0\"?>\n<feed lang=\"no\"><title>Bøker &amp; blader</title>"
+                                       "<!-- note --><entry id='1'/></feed>")),
+                   S("<feed lang=\"no\"><title>[Bøker & blader]</title><entry id=\"1\"></entry></feed>"),
+                   "elements, attributes and decoded text, without the declaration and comments");
+    test_check_str(test, xml_outline(test, S("<a>one<![CDATA[ <two> ]]>three&#x21;</a>")), S("<a>[one <two> three!]</a>"),
+                   "text in pieces comes as one event");
+    test_check_str(test,
+                   xml_outline(test, S("<rss xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:creator>Ibsen</dc:creator></rss>")),
+                   S("<rss xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:creator>[Ibsen]</dc:creator></rss>"),
+                   "names keep their prefix");
+    test_check_str(test,
+                   xml_outline(test, S("<!DOCTYPE a [<!ENTITY who \"Nora\"><!ATTLIST a kind CDATA \"play\">]><a>&who;</a>")),
+                   S("<a kind=\"play\">[Nora]</a>"), "entities and attribute defaults from the DTD");
+    const char utf16[] = "\xFF\xFE<\0a\0>\0\xE6\0<\0/\0a\0>\0";
+    test_check_str(test, xml_outline(test, (String){ utf16, sizeof utf16 - 1 }), S("<a>[æ]</a>"),
+                   "UTF-16 with a byte order mark");
+    test_check_str(test, xml_outline(test, S("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a>\xE6</a>")),
+                   S("<a>[æ]</a>"), "ISO-8859-1 as declared");
+
+    XmlEvents events = { 0 };
+    test_check(test, xml_parse(test->arena, S("<a>\n  <b/>\n</a>"), &events, nullptr) == ERR_OK && events.count == 6 &&
+                         events.items[2].line == 2 && events.items[5].line == 3,
+               "events know their line");
+}
+
+static void xml_rejects_malformed_and_hostile_documents(Test *test)
+{
+    XmlEvents events = { 0 };
+    Err err = { 0 };
+    test_check(test, xml_parse(test->arena, S("<a>\n<b></a>"), &events, &err) == ERR_PARSE, "a mismatched tag");
+    test_check_str(test, S(err.msg), S("xml: line 2, column 6: mismatched tag"), "names the line and column");
+    test_check(test, xml_parse(test->arena, S(""), &events, &err) == ERR_PARSE, "no element at all");
+
+    // Expat checks the amplification once 8 MiB have come out, so a long lol0 gets there in few expansions,
+    // which keeps the test fast under gcc's sanitizers.
+    StringBuilder laughs = str_builder_create(test->arena, 4096);
+    str_builder_append_format(&laughs, "<!DOCTYPE lolz [<!ENTITY lol0 \"%s\">", str_repeat(test->arena, S("lol"), 341).data);
+    for (int i = 1; i <= 9; i++) {
+        str_builder_append_format(&laughs, "<!ENTITY lol%d \"", i);
+        for (int j = 0; j < 10; j++) {
+            str_builder_append_format(&laughs, "&lol%d;", i - 1);
+        }
+        str_builder_append(&laughs, S("\">"));
+    }
+    str_builder_append(&laughs, S("]><lolz>&lol9;</lolz>"));
+    test_check(test, xml_parse(test->arena, str_builder_finish(&laughs), &events, &err) == ERR_PARSE,
+               "billion laughs, a billion copies of lol from a page of entities");
+    test_check(test, str_contains(S(err.msg), S("amplification")), err.msg);
+
+    test_check(test,
+               xml_parse(test->arena, S("<!DOCTYPE a [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><a>&e;</a>"), &events,
+                         &err) == ERR_OK &&
+                   events.count == 2,
+               "an external entity is never loaded");
+}
+
 const TestCase ENCODING_TESTS[] = {
     { "json_parses_every_kind", json_parses_every_kind },
     { "json_decodes_strings", json_decodes_strings },
@@ -487,5 +576,7 @@ const TestCase ENCODING_TESTS[] = {
     { "markdown_renders_the_commonmark_spec_examples", markdown_renders_the_commonmark_spec_examples },
     { "markdown_renders_github_extensions", markdown_renders_github_extensions },
     { "markdown_keeps_html_and_scripts_out", markdown_keeps_html_and_scripts_out },
+    { "xml_reads_elements_attributes_and_text", xml_reads_elements_attributes_and_text },
+    { "xml_rejects_malformed_and_hostile_documents", xml_rejects_malformed_and_hostile_documents },
     { nullptr, nullptr },
 };
