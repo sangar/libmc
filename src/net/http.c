@@ -1,6 +1,7 @@
 #include "mc/net/http.h"
 
 #include <curl/curl.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "mc/platform/platform.h"
@@ -85,12 +86,17 @@ bool http_response_header(const HttpResponse *response, String name, String *val
     return false;
 }
 
-// Hop collects one response: the body and headers curl hands over, in the caller's arena.
+// Hop collects one response: the body and headers curl hands over, in the
+// caller's arena, or a 2xx body in the download file.
 typedef struct Hop {
+    CURL *curl;
     Arena *arena;
     StringBuilder body;
     size_t max_body;
     bool too_large;
+    const HttpDownload *download;
+    int64_t downloaded;
+    bool write_failed;
     HttpHeader *headers;
     size_t header_count;
     size_t header_capacity;
@@ -100,6 +106,16 @@ static size_t receive_body(char *data, size_t size, size_t count, void *argument
 {
     Hop *hop = argument;
     size_t length = size * count;
+    long status = 0;
+    curl_easy_getinfo(hop->curl, CURLINFO_RESPONSE_CODE, &status);
+    if (hop->download != nullptr && status >= 200 && status < 300) {
+        if (file_write(hop->download->fd, (String){ data, length }, nullptr) != ERR_OK) {
+            hop->write_failed = true;
+            return 0;
+        }
+        hop->downloaded += (int64_t)length;
+        return length;
+    }
     if (hop->body.len + length > hop->max_body) {
         hop->too_large = true;
         return 0;
@@ -133,6 +149,47 @@ static size_t receive_header(char *data, size_t size, size_t count, void *argume
         };
     }
     return length;
+}
+
+// BodySource feeds body_file to curl, from its offset again on each hop and on each rewind curl asks for.
+typedef struct BodySource {
+    const HttpFileBody *file;
+    int64_t position;
+    bool read_failed;
+} BodySource;
+
+static size_t send_body(char *buffer, size_t size, size_t count, void *argument)
+{
+    BodySource *source = argument;
+    int64_t remaining = source->file->length - source->position;
+    if (remaining <= 0) {
+        return 0;
+    }
+    size_t got = 0;
+    if (file_pread(source->file->fd, buffer, min_size(size * count, (size_t)remaining),
+                   source->file->offset + source->position, &got, nullptr) != ERR_OK ||
+        got == 0) {
+        source->read_failed = true;
+        return CURL_READFUNC_ABORT;
+    }
+    source->position += (int64_t)got;
+    return got;
+}
+
+static int rewind_body(void *argument, curl_off_t offset, int origin)
+{
+    BodySource *source = argument;
+    if (origin != SEEK_SET || offset < 0 || offset > source->file->length) {
+        return CURL_SEEKFUNC_CANTSEEK;
+    }
+    source->position = offset;
+    return CURL_SEEKFUNC_OK;
+}
+
+static int check_cancel(void *argument, curl_off_t download_total, curl_off_t downloaded, curl_off_t upload_total,
+                        curl_off_t uploaded)
+{
+    return cancel_requested(argument) ? 1 : 0;
 }
 
 static const char *const METHODS[] = { "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE" };
@@ -175,8 +232,18 @@ static bool is_method(String method)
     return e;
 }
 
-[[nodiscard]] static Error map_curl_error(CURLcode code, const Hop *hop, const char *detail, Err *err)
+[[nodiscard]] static Error map_curl_error(CURLcode code, const Hop *hop, const BodySource *source, Cancel *cancel,
+                                         const char *detail, Err *err)
 {
+    if (hop->write_failed) {
+        return err_set(err, ERR_IO, "http: cannot write the download");
+    }
+    if (source->read_failed) {
+        return err_set(err, ERR_IO, "http: cannot read the body file");
+    }
+    if (cancel != nullptr && cancel_requested(cancel)) {
+        return err_set(err, ERR_CANCELLED, "http: cancelled");
+    }
     // curl refuses a declared Content-Length over the limit itself; the write callback catches the rest.
     if (hop->too_large || code == CURLE_FILESIZE_EXCEEDED) {
         return err_set(err, ERR_UNSUPPORTED, "http: response body larger than %zu bytes", hop->max_body);
@@ -200,11 +267,16 @@ typedef struct HopRequest {
     const char *method;
     const char *url;
     String body;
+    const HttpFileBody *body_file;
     bool has_body;
+    // decode is whether the client asked for gzip and deflate, and so decodes them.
+    bool decode;
+    Cancel *cancel;
+    int64_t timeout_ms;
 } HopRequest;
 
 static void set_options(HttpClient *client, const HopRequest *hop_request, struct curl_slist *headers, Hop *hop,
-                        char *error_buffer)
+                        BodySource *source, char *error_buffer)
 {
     CURL *curl = client->curl;
     curl_easy_reset(curl);
@@ -215,10 +287,25 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)client->config.connect_timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)client->config.timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)client->config.max_response_bytes);
+    int64_t timeout_ms = hop_request->timeout_ms != 0 ? hop_request->timeout_ms : client->config.timeout_ms;
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms > 0 ? (long)timeout_ms : 0L);
+    if (client->config.stall_timeout_ms > 0) {
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, (long)((client->config.stall_timeout_ms + 999) / 1000));
+    }
+    // A download's size is not the memory limit's business; receive_body applies the limit to bodies it keeps.
+    if (hop->download == nullptr) {
+        curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)client->config.max_response_bytes);
+    }
     // An empty list asks for every encoding curl decodes, gzip and deflate; receive_body counts decoded bytes.
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    if (hop_request->decode) {
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    }
+    if (hop_request->cancel != nullptr) {
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, check_cancel);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, hop_request->cancel);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, receive_body);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, hop);
@@ -235,7 +322,15 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
     } else if (strcmp(hop_request->method, "GET") != 0) {
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, hop_request->method);
     }
-    if (hop_request->has_body) {
+    if (hop_request->has_body && hop_request->body_file != nullptr) {
+        // An upload is a PUT to curl; CUSTOMREQUEST above names any other method.
+        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+        curl_easy_setopt(curl, CURLOPT_READFUNCTION, send_body);
+        curl_easy_setopt(curl, CURLOPT_READDATA, source);
+        curl_easy_setopt(curl, CURLOPT_SEEKFUNCTION, rewind_body);
+        curl_easy_setopt(curl, CURLOPT_SEEKDATA, source);
+        curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t)hop_request->body_file->length);
+    } else if (hop_request->has_body) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, hop_request->body.len > 0 ? hop_request->body.data : "");
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)hop_request->body.len);
     }
@@ -266,6 +361,16 @@ static void set_options(HttpClient *client, const HopRequest *hop_request, struc
     return ERR_OK;
 }
 
+static bool sets_header(const HttpRequest *request, String name)
+{
+    for (size_t i = 0; i < request->header_count; i++) {
+        if (str_equal_ignore_case(request->headers[i].name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // follows reports whether status redirects, and turns the request into the next hop's.
 static bool follows(long status, HopRequest *hop_request)
 {
@@ -274,6 +379,7 @@ static bool follows(long status, HopRequest *hop_request)
             hop_request->method = "GET";
         }
         hop_request->has_body = false;
+        hop_request->body_file = nullptr;
         return true;
     }
     return status == 307 || status == 308;
@@ -286,13 +392,20 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
         return err_set(err, ERR_INVALID_ARGUMENT, "http: unsupported method %.*s", (int)min_size(method.len, 16),
                        method.data);
     }
+    if (request->body_file != nullptr && (request->body_file->offset < 0 || request->body_file->length < 0)) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "http: body_file has a negative offset or length");
+    }
     Arena *scratch = arena_create(0);
     HopRequest hop_request = {
         .method = str_cstr(scratch, method),
         .url = str_cstr(scratch, request->url),
         .body = request->body,
-        .has_body = request->body.len > 0 || str_equal(method, S("POST")) || str_equal(method, S("PUT")) ||
-                    str_equal(method, S("PATCH")),
+        .body_file = request->body_file,
+        .has_body = request->body.len > 0 || request->body_file != nullptr || str_equal(method, S("POST")) ||
+                    str_equal(method, S("PUT")) || str_equal(method, S("PATCH")),
+        .decode = !sets_header(request, S("Accept-Encoding")),
+        .cancel = request->cancel,
+        .timeout_ms = request->timeout_ms,
     };
     struct curl_slist *headers = nullptr;
     Error e = header_list(request, scratch, &headers, err);
@@ -301,16 +414,23 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
         if (e) {
             break;
         }
+        if (request->cancel != nullptr && cancel_requested(request->cancel)) {
+            e = err_set(err, ERR_CANCELLED, "http: cancelled");
+            break;
+        }
         Hop hop = {
+            .curl = client->curl,
             .arena = arena,
             .body = str_builder_create(arena, INITIAL_BODY_CAPACITY),
             .max_body = client->config.max_response_bytes,
+            .download = request->download,
         };
+        BodySource source = { .file = hop_request.body_file };
         char error_buffer[CURL_ERROR_SIZE] = "";
-        set_options(client, &hop_request, headers, &hop, error_buffer);
+        set_options(client, &hop_request, headers, &hop, &source, error_buffer);
         CURLcode code = curl_easy_perform(client->curl);
         if (code != CURLE_OK) {
-            e = map_curl_error(code, &hop, error_buffer, err);
+            e = map_curl_error(code, &hop, &source, request->cancel, error_buffer, err);
             break;
         }
         long status = 0;
@@ -333,6 +453,7 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
             .header_count = hop.header_count,
             .body = str_builder_finish(&hop.body),
             .url = str_copy(arena, S(hop_request.url)),
+            .downloaded = hop.downloaded,
         };
         break;
     }
