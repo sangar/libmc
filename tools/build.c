@@ -61,7 +61,7 @@ static const char *const WARNING_FLAGS[] = {
     "-Wstrict-prototypes", "-Wimplicit-fallthrough", "-Wno-unused-parameter",
 };
 static const char *const DEBUG_FLAGS[] = { "-g", "-O0", "-fsanitize=address,undefined", "-fno-omit-frame-pointer" };
-static const char *const RELEASE_FLAGS[] = { "-O2", "-DNDEBUG" };
+static const char *const RELEASE_FLAGS[] = { "-O2" };
 static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log", "net" };
 
 
