@@ -32,7 +32,8 @@ size_t arena_size_mul(size_t a, size_t b);
 // the capacity, and updates *capacity.
 void *arena_grow(Arena *arena, void *items, size_t *capacity, size_t count, size_t item_size);
 
-// arena_reset discards every allocation and keeps the blocks for reuse.
+// arena_reset discards every allocation and frees all blocks but the first;
+// arena_release keeps them for reuse.
 void arena_reset(Arena *arena);
 ArenaMark arena_mark(Arena *arena);
 void arena_release(ArenaMark mark);
