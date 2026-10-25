@@ -466,6 +466,30 @@ static void unix_sockets_carry_bytes(Test *test)
     test_check(test, dir_remove_all(dir, &err) == ERR_OK, "clean up");
 }
 
+static void socket_pairs_carry_bytes_without_waiting(Test *test)
+{
+    Err err = { 0 };
+    int fds[2];
+    test_check(test, net_pair(fds, &err) == ERR_OK, "create a pair");
+    char buffer[16];
+    size_t got = 99;
+    test_check(test, net_receive_nowait(fds[1], buffer, sizeof buffer, &got, &err) == ERR_OK && got == 0,
+               "nothing has arrived");
+    test_check(test, net_send(fds[0], S("blåbærsyltetøy"), &err) == ERR_OK, "send");
+    char text[32];
+    size_t len = 0;
+    while (len < sizeof text && net_receive_nowait(fds[1], text + len, sizeof text - len, &got, &err) == ERR_OK &&
+           got > 0) {
+        len += got;
+    }
+    test_check_str(test, (String){ text, len }, S("blåbærsyltetøy"), "the bytes arrive");
+    net_close(fds[0]);
+    test_check(test, net_receive_nowait(fds[1], buffer, sizeof buffer, &got, &err) == ERR_OK && got == 0,
+               "a closed peer reads as nothing");
+    test_check(test, net_send(fds[1], S("data"), nullptr) == ERR_NETWORK, "sending to a closed peer fails");
+    net_close(fds[1]);
+}
+
 static void network_reports_the_port_it_chose(Test *test)
 {
     Arena *a = test->arena;
@@ -738,6 +762,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "dir_read_describes_each_entry", dir_read_describes_each_entry },
     { "files_map_and_append", files_map_and_append },
     { "unix_sockets_carry_bytes", unix_sockets_carry_bytes },
+    { "socket_pairs_carry_bytes_without_waiting", socket_pairs_carry_bytes_without_waiting },
     { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
     { "file_lock_keeps_out_a_second_holder", file_lock_keeps_out_a_second_holder },
     { "detached_processes_lead_a_session_and_write_to_a_file", detached_processes_lead_a_session_and_write_to_a_file },
