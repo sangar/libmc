@@ -77,17 +77,21 @@ Arena *arena_create(size_t block_size)
     return arena;
 }
 
-void arena_destroy(Arena *arena)
+static void free_from(Block *block)
 {
-    if (arena == nullptr) {
-        return;
-    }
-    Block *block = arena->first;
     while (block != nullptr) {
         Block *next = block->next;
         free(block);
         block = next;
     }
+}
+
+void arena_destroy(Arena *arena)
+{
+    if (arena == nullptr) {
+        return;
+    }
+    free_from(arena->first);
     free(arena);
 }
 
@@ -149,9 +153,12 @@ static void clear_from(Block *block)
     }
 }
 
+// A burst would otherwise stay allocated for as long as the arena lives.
 void arena_reset(Arena *arena)
 {
-    clear_from(arena->first);
+    free_from(arena->first->next);
+    arena->first->next = nullptr;
+    arena->first->used = 0;
     arena->current = arena->first;
 }
 
