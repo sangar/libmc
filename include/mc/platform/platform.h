@@ -281,6 +281,12 @@ void net_close(int fd);
 [[nodiscard]] Error net_send(int fd, String data, Err *err);
 // net_receive reads up to capacity bytes; *got is 0 once the peer has closed.
 [[nodiscard]] Error net_receive(int fd, void *buffer, size_t capacity, size_t *got, Err *err);
+// net_pair creates two connected stream sockets in this process, for
+// driving a server in-process without a port. Close each with net_close.
+[[nodiscard]] Error net_pair(int fds[2], Err *err);
+// net_receive_nowait reads up to capacity bytes that have already arrived,
+// without waiting: *got is 0 when nothing has, or once the peer has closed.
+[[nodiscard]] Error net_receive_nowait(int fd, void *buffer, size_t capacity, size_t *got, Err *err);
 // net_shutdown ends both directions of fd, which wakes a thread blocked in
 // net_receive on it. The descriptor stays open until net_close.
 void net_shutdown(int fd);
