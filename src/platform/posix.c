@@ -2149,6 +2149,38 @@ Error net_receive(int fd, void *buffer, size_t capacity, size_t *got, Err *err)
     }
 }
 
+Error net_pair(int fds[2], Err *err)
+{
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        return err_set(err, ERR_NETWORK, "socket pair: %s", strerror(errno));
+    }
+    if (!prepare_socket(fds[0]) || !prepare_socket(fds[1])) {
+        Error e = err_set(err, ERR_NETWORK, "socket pair: %s", strerror(errno));
+        close(fds[0]);
+        close(fds[1]);
+        return e;
+    }
+    return ERR_OK;
+}
+
+Error net_receive_nowait(int fd, void *buffer, size_t capacity, size_t *got, Err *err)
+{
+    *got = 0;
+    for (;;) {
+        ssize_t n = recv(fd, buffer, capacity, MSG_DONTWAIT);
+        if (n >= 0) {
+            *got = (size_t)n;
+            return ERR_OK;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return ERR_OK;
+        }
+        if (errno != EINTR) {
+            return err_set(err, ERR_NETWORK, "receive: %s", strerror(errno));
+        }
+    }
+}
+
 void net_shutdown(int fd)
 {
     shutdown(fd, SHUT_RDWR);
