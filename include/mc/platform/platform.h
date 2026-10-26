@@ -113,6 +113,9 @@ bool file_find_upward(Arena *arena, String directory, StringList names, String *
 [[nodiscard]] Error file_remove(String path, Err *err);
 [[nodiscard]] Error file_set_mtime(String path, int64_t mtime_ns, Err *err);
 
+// file_read_to_end reads fd until its end into the arena, NUL-terminated,
+// such as a file or standard input from a pipe.
+[[nodiscard]] Error file_read_to_end(Arena *arena, int fd, String *contents, Err *err);
 // file_read_all reads the whole file into the arena, NUL-terminated.
 [[nodiscard]] Error file_read_all(Arena *arena, String path, String *contents, Err *err);
 [[nodiscard]] Error file_write_all(String path, String contents, unsigned mode, Err *err);
