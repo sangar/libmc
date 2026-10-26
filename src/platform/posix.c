@@ -14,6 +14,8 @@
 #include <locale.h>
 #include <math.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -2161,6 +2163,74 @@ Error net_pair(int fds[2], Err *err)
         return e;
     }
     return ERR_OK;
+}
+
+Error net_set_nonblocking(int fd, Err *err)
+{
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        return err_set(err, ERR_NETWORK, "fcntl: %s", strerror(errno));
+    }
+    return ERR_OK;
+}
+
+// net_try_accept leaves out Nagle's delay where it can: a Unix socket has none to turn off.
+bool net_try_accept(int listener, int *client)
+{
+    int fd = -1;
+    do {
+        fd = accept(listener, nullptr, nullptr);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) {
+        return false;
+    }
+    if (!prepare_socket(fd) || net_set_nonblocking(fd, nullptr) != ERR_OK) {
+        close(fd);
+        return false;
+    }
+    int one = 1;
+    unused(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one));
+    *client = fd;
+    return true;
+}
+
+NetResult net_try_receive(int fd, void *buffer, size_t capacity, size_t *got)
+{
+    *got = 0;
+    ssize_t n = 0;
+    do {
+        n = recv(fd, buffer, capacity, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return NET_WOULD_BLOCK;
+    }
+    if (n <= 0) {
+        return NET_CLOSED;
+    }
+    *got = (size_t)n;
+    return NET_DONE;
+}
+
+NetResult net_try_send(int fd, String data, size_t *sent)
+{
+#ifdef MSG_NOSIGNAL
+    int flags = MSG_DONTWAIT | MSG_NOSIGNAL;
+#else
+    int flags = MSG_DONTWAIT;
+#endif
+    *sent = 0;
+    ssize_t n = 0;
+    do {
+        n = send(fd, data.data, data.len, flags);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return NET_WOULD_BLOCK;
+    }
+    if (n < 0) {
+        return NET_CLOSED;
+    }
+    *sent = (size_t)n;
+    return NET_DONE;
 }
 
 Error net_receive_nowait(int fd, void *buffer, size_t capacity, size_t *got, Err *err)
