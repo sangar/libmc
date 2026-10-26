@@ -56,3 +56,4 @@ extern const AbortCase ABORT_CASES[];
 void terminal_round_trip(void);
 void signal_watch_round_trip(void);
 void reaper_round_trip(void);
+void children_round_trip(void);
