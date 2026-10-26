@@ -158,7 +158,8 @@ String str_slice(String s, size_t start, size_t end)
 {
     end = min_size(end, s.len);
     start = min_size(start, end);
-    return (String){ .data = s.data + start, .len = end - start };
+    // The empty String { 0 } has no data to offset.
+    return (String){ .data = start == 0 ? s.data : s.data + start, .len = end - start };
 }
 
 String str_trim(String s)
