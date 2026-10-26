@@ -669,6 +669,31 @@ void signal_watch_round_trip(void)
     }
 }
 
+// children_round_trip blocks the signals, as a program that watches them
+// does, and runs children that interrupt themselves. It aborts once the
+// interrupt ended both: a child that inherited the blocked signals would
+// exit 0.
+void children_round_trip(void)
+{
+    signals_block();
+    Arena *a = arena_create(0);
+    const char *const interrupted[] = { "sh", "-c", "kill -INT $$; exit 0" };
+    StringList argv = strlist_of(a, countof(interrupted), interrupted);
+    ProcessResult result;
+    bool captured_ended = process_run(a, argv, S(""), &result, nullptr) == ERR_OK && result.signal == SIGINT;
+    int exit_code = 0;
+    bool interactive_ended =
+        process_run_interactive(a, argv, &exit_code, nullptr) == ERR_OK && exit_code == 128 + SIGINT;
+    if (captured_ended && interactive_ended) {
+        abort();
+    }
+}
+
+static void children_start_with_default_signals(Test *test)
+{
+    test_check_aborts(test, "children_round_trip", "a child ends on an interrupt its parent blocks");
+}
+
 static void signal_watch_calls_back(Test *test)
 {
     test_check_aborts(test, "signal_watch_round_trip", "a stop signal reaches the callback, and the watch stops");
@@ -771,6 +796,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "file_find_upward_climbs", file_find_upward_climbs },
     { "dir_runtime_is_private", dir_runtime_is_private },
     { "signal_watch_calls_back", signal_watch_calls_back },
+    { "children_start_with_default_signals", children_start_with_default_signals },
     { "frames_cross_a_socket_whole", frames_cross_a_socket_whole },
     { nullptr, nullptr },
 };
