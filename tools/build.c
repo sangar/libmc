@@ -62,7 +62,7 @@ static const char *const WARNING_FLAGS[] = {
 };
 static const char *const DEBUG_FLAGS[] = { "-g", "-O0", "-fsanitize=address,undefined", "-fno-omit-frame-pointer" };
 static const char *const RELEASE_FLAGS[] = { "-O2" };
-static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log", "net" };
+static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log", "net", "term" };
 
 
 // Dependency is a vendored library, pinned in deps.lock. It compiles in its
