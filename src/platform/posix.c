@@ -640,16 +640,11 @@ Error file_set_mtime(String path, int64_t mtime_ns, Err *err)
     return utimensat(AT_FDCWD, cpath.text, times, 0) == 0 ? ERR_OK : posix_fail_errno(err, "set mtime %s", cpath.text);
 }
 
-Error file_read_all(Arena *arena, String path, String *contents, Err *err)
+Error file_read_to_end(Arena *arena, int fd, String *contents, Err *err)
 {
     *contents = S("");
-    int fd;
-    Error e = file_open_read(path, &fd, err);
-    if (e != ERR_OK) {
-        return e;
-    }
     FileInfo info;
-    e = file_info_fd(fd, &info, err);
+    Error e = file_info_fd(fd, &info, err);
     size_t capacity = e == ERR_OK && info.size > 0 ? (size_t)info.size + 1 : 4096;
     char *data = arena_push_aligned(arena, capacity, 1);
     size_t len = 0;
@@ -675,12 +670,27 @@ Error file_read_all(Arena *arena, String path, String *contents, Err *err)
         }
         len += got;
     }
+    if (e != ERR_OK) {
+        return e;
+    }
+    data[len] = '\0';
+    *contents = (String){ .data = data, .len = len };
+    return ERR_OK;
+}
+
+Error file_read_all(Arena *arena, String path, String *contents, Err *err)
+{
+    *contents = S("");
+    int fd;
+    Error e = file_open_read(path, &fd, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    e = file_read_to_end(arena, fd, contents, err);
     file_close(fd);
     if (e != ERR_OK) {
         return err_wrap(err, e, "read %.*s", (int)path.len, path.data);
     }
-    data[len] = '\0';
-    *contents = (String){ .data = data, .len = len };
     return ERR_OK;
 }
 
