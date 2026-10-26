@@ -11,6 +11,7 @@ static void str_slicing_and_search(Test *test)
     test_check(test, str_find_last_char(S("a/b/c"), '/', &index) && index == 3, "find_last_char");
     test_check(test, str_starts_with(s, S("doc")) && str_ends_with(s, S(".txt")), "prefix and suffix");
     test_check(test, str_slice(s, 50, 60).len == 0, "slice clamps out-of-range");
+    test_check(test, str_slice((String){ 0 }, 0, 0).len == 0, "slice the empty string with no data");
     test_check(test, str_compare(S("ab"), S("abc")) < 0 && str_compare(S("b"), S("abc")) > 0, "compare orders");
     test_check(test, str_compare_ignore_case(S("Readme"), S("rat")) > 0 && str_compare_ignore_case(S("Readme"), S("rest")) < 0,
                "compare ignoring case folds letters");
