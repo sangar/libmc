@@ -121,6 +121,23 @@ static void file_create_unique_validates_its_pattern(Test *test)
     test_check(test, dir_remove_all(dir, &err) == ERR_OK, "remove the tree");
 }
 
+// A stream has no size to read by, as standard input from a pipe has none.
+static void file_read_to_end_reads_a_stream(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    int fds[2];
+    test_check(test, net_pair(fds, &err) == ERR_OK, "a socket pair");
+    String text = str_repeat(a, S("æøå\n"), 1000);
+    test_check(test, file_write(fds[0], text, &err) == ERR_OK, "write more than the first buffer holds");
+    file_close(fds[0]);
+    String read;
+    test_check(test, file_read_to_end(a, fds[1], &read, &err) == ERR_OK && str_equal(read, text),
+               "everything up to the end comes back");
+    test_check(test, terminal_columns(fds[1]) == 80, "a socket is no terminal, so 80 columns");
+    file_close(fds[1]);
+}
+
 static void dir_create_needs_a_directory(Test *test)
 {
     Arena *a = test->arena;
@@ -774,6 +791,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
     { "file_create_unique_validates_its_pattern", file_create_unique_validates_its_pattern },
+    { "file_read_to_end_reads_a_stream", file_read_to_end_reads_a_stream },
     { "dir_create_needs_a_directory", dir_create_needs_a_directory },
     { "paths_resolve_against_the_system", paths_resolve_against_the_system },
     { "look_path_survives_long_entries", look_path_survives_long_entries },
