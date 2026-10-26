@@ -1,0 +1,519 @@
+#include "http1.h"
+
+#include <assert.h>
+#include <llhttp.h>
+#include <time.h>
+
+#include "mc/platform/platform.h"
+
+// MAX_LINE_END_BYTES before a request are one empty line, all RFC 9112 2.2 asks
+// a server to skip; llhttp skips any number.
+enum { MAX_LINE_END_BYTES = 2 };
+enum { URL_CAPACITY = 256, FIELD_CAPACITY = 64, OUTPUT_CAPACITY = 1024, BODY_CAPACITY = 256 };
+
+struct Http1 {
+    Arena *arena;
+    Arena *request_arena; // reset at the start of each request
+    HttpServerLimits limits;
+    llhttp_t parser;
+    StringBuilder output;
+    size_t taken; // output bytes already handed out
+    StringBuilder url;
+    StringBuilder field;
+    StringBuilder value;
+    StringBuilder body;
+    String field_name; // the name of the field whose value is being parsed
+    HttpHeader *headers;
+    size_t header_count;
+    size_t header_capacity;
+    HttpServerRequest request;
+    size_t host_count;
+    size_t transfer_encoding_count;
+    bool chunked; // the last Transfer-Encoding is exactly "chunked"
+    bool expects_continue;
+    size_t header_bytes;
+    size_t body_bytes;
+    unsigned reject_status; // set by a callback that refuses the request, 0 otherwise
+    bool between_messages;
+    size_t line_end_bytes; // CR and LF bytes since the last message
+    bool closing;          // the last request closes the connection
+    bool in_trailer;
+    size_t extension_name_bytes;
+    bool awaiting_response;
+};
+
+static bool method_served(String method)
+{
+    static const char *const SERVED[] = { "GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "TRACE", "PATCH" };
+    for (size_t i = 0; i < countof(SERVED); i++) {
+        if (str_equal(method, S(SERVED[i]))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool visible_ascii(String text)
+{
+    for (size_t i = 0; i < text.len; i++) {
+        unsigned char byte = (unsigned char)text.data[i];
+        if (byte < 0x21 || byte >= 0x7f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool token_byte(unsigned char byte)
+{
+    static const char SEPARATORS[] = "\"(),/:;<=>?@[\\]{}";
+    for (size_t i = 0; i < sizeof SEPARATORS - 1; i++) {
+        if (byte == (unsigned char)SEPARATORS[i]) {
+            return false;
+        }
+    }
+    return byte > 0x20 && byte < 0x7f;
+}
+
+static bool field_name_valid(String name)
+{
+    for (size_t i = 0; i < name.len; i++) {
+        if (!token_byte((unsigned char)name.data[i])) {
+            return false;
+        }
+    }
+    return name.len > 0;
+}
+
+static bool field_value_valid(String value)
+{
+    for (size_t i = 0; i < value.len; i++) {
+        char byte = value.data[i];
+        if (byte == '\r' || byte == '\n' || byte == '\0') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static String reason_phrase(unsigned status)
+{
+    static const struct {
+        unsigned status;
+        const char *reason;
+    } REASONS[] = {
+        { 100, "Continue" },
+        { 200, "OK" },
+        { 201, "Created" },
+        { 202, "Accepted" },
+        { 204, "No Content" },
+        { 206, "Partial Content" },
+        { 301, "Moved Permanently" },
+        { 302, "Found" },
+        { 303, "See Other" },
+        { 304, "Not Modified" },
+        { 307, "Temporary Redirect" },
+        { 308, "Permanent Redirect" },
+        { 400, "Bad Request" },
+        { 401, "Unauthorized" },
+        { 403, "Forbidden" },
+        { 404, "Not Found" },
+        { 405, "Method Not Allowed" },
+        { 409, "Conflict" },
+        { 410, "Gone" },
+        { 412, "Precondition Failed" },
+        { 413, "Content Too Large" },
+        { 414, "URI Too Long" },
+        { 415, "Unsupported Media Type" },
+        { 422, "Unprocessable Content" },
+        { 429, "Too Many Requests" },
+        { 431, "Request Header Fields Too Large" },
+        { 500, "Internal Server Error" },
+        { 501, "Not Implemented" },
+        { 502, "Bad Gateway" },
+        { 503, "Service Unavailable" },
+        { 505, "HTTP Version Not Supported" },
+    };
+    for (size_t i = 0; i < countof(REASONS); i++) {
+        if (REASONS[i].status == status) {
+            return S(REASONS[i].reason);
+        }
+    }
+    return S("");
+}
+
+// append_date writes the Date field in the IMF-fixdate form of RFC 9110 5.6.7,
+// with English names whatever the locale.
+static void append_date(StringBuilder *output)
+{
+    static const char *const DAYS[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *const MONTHS[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    time_t now = (time_t)(clock_wall_ns() / 1000000000);
+    struct tm utc;
+    gmtime_r(&now, &utc);
+    str_builder_append_format(output, "Date: %s, %02d %s %04d %02d:%02d:%02d GMT\r\n", DAYS[utc.tm_wday], utc.tm_mday,
+                              MONTHS[utc.tm_mon], utc.tm_year + 1900, utc.tm_hour, utc.tm_min, utc.tm_sec);
+}
+
+static bool status_has_body(unsigned status)
+{
+    return status != 204 && status != 304;
+}
+
+static void append_response(Http1 *http, const HttpServerResponse *response, bool keep_alive)
+{
+    String reason = reason_phrase(response->status);
+    str_builder_append_format(&http->output, "HTTP/1.1 %u %.*s\r\n", response->status, (int)reason.len, reason.data);
+    append_date(&http->output);
+    for (size_t i = 0; i < response->header_count; i++) {
+        HttpHeader header = response->headers[i];
+        str_builder_append_format(&http->output, "%.*s: %.*s\r\n", (int)header.name.len, header.name.data,
+                                  (int)header.value.len, header.value.data);
+    }
+    if (status_has_body(response->status)) {
+        str_builder_append_format(&http->output, "Content-Length: %zu\r\n", response->body.len);
+    }
+    str_builder_append_format(&http->output, "Connection: %s\r\n\r\n", keep_alive ? "keep-alive" : "close");
+    if (llhttp_get_method(&http->parser) != HTTP_HEAD && status_has_body(response->status)) {
+        str_builder_append(&http->output, response->body);
+    }
+}
+
+static void append_rejection(Http1 *http, String reason)
+{
+    unsigned status = http->reject_status != 0 ? http->reject_status : 400;
+    HttpHeader content_type = { S("Content-Type"), S("text/plain") };
+    HttpServerResponse response = {
+        .status = status,
+        .headers = &content_type,
+        .header_count = 1,
+        .body = str_format(http->request_arena, "%.*s\n", (int)reason.len, reason.data),
+    };
+    append_response(http, &response, false);
+    http->closing = true;
+}
+
+static int reject(Http1 *http, unsigned status)
+{
+    http->reject_status = status;
+    return -1;
+}
+
+static int count_header_bytes(Http1 *http, size_t length)
+{
+    http->header_bytes += length;
+    return http->header_bytes > http->limits.max_header_bytes ? reject(http, 431) : 0;
+}
+
+static int on_message_begin(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    arena_reset(http->request_arena);
+    Arena *arena = http->request_arena;
+    http->between_messages = false;
+    http->in_trailer = false;
+    http->output = str_builder_create(arena, OUTPUT_CAPACITY);
+    http->taken = 0;
+    http->url = str_builder_create(arena, URL_CAPACITY);
+    http->field = str_builder_create(arena, FIELD_CAPACITY);
+    http->value = str_builder_create(arena, FIELD_CAPACITY);
+    http->body = str_builder_create(arena, BODY_CAPACITY);
+    http->headers = nullptr;
+    http->header_count = 0;
+    http->header_capacity = 0;
+    http->host_count = 0;
+    http->transfer_encoding_count = 0;
+    http->chunked = false;
+    http->expects_continue = false;
+    http->header_bytes = 0;
+    http->body_bytes = 0;
+    return 0;
+}
+
+static int on_url(llhttp_t *parser, const char *at, size_t length)
+{
+    Http1 *http = parser->data;
+    str_builder_append(&http->url, (String){ at, length });
+    return count_header_bytes(http, length);
+}
+
+// on_url_complete accepts the origin form and "*"; absolute and authority
+// forms are for proxies.
+static int on_url_complete(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    String target = str_builder_finish(&http->url);
+    bool valid = (str_starts_with(target, S("/")) || str_equal(target, S("*"))) && visible_ascii(target);
+    return valid ? 0 : reject(http, 400);
+}
+
+static int on_header_field(llhttp_t *parser, const char *at, size_t length)
+{
+    Http1 *http = parser->data;
+    str_builder_append(&http->field, (String){ at, length });
+    return count_header_bytes(http, length);
+}
+
+static int on_header_field_complete(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    String name = str_copy(http->request_arena, str_builder_finish(&http->field));
+    http->field.len = 0;
+    if (http->in_trailer && str_equal_ignore_case(name, S("Connection"))) {
+        return reject(http, 400);
+    }
+    http->host_count += str_equal_ignore_case(name, S("Host")) ? 1 : 0;
+    http->transfer_encoding_count += str_equal_ignore_case(name, S("Transfer-Encoding")) ? 1 : 0;
+    http->field_name = name;
+    return 0;
+}
+
+static int on_header_value(llhttp_t *parser, const char *at, size_t length)
+{
+    Http1 *http = parser->data;
+    str_builder_append(&http->value, (String){ at, length });
+    return count_header_bytes(http, length);
+}
+
+static int on_header_value_complete(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    String value = str_trim(str_copy(http->request_arena, str_builder_finish(&http->value)));
+    http->value.len = 0;
+    if (http->in_trailer) {
+        return 0;
+    }
+    String name = http->field_name;
+    if (str_equal_ignore_case(name, S("Transfer-Encoding"))) {
+        http->chunked = str_equal_ignore_case(value, S("chunked"));
+    }
+    if (str_equal_ignore_case(name, S("Expect"))) {
+        http->expects_continue = str_equal_ignore_case(value, S("100-continue"));
+    }
+    http->headers =
+        arena_grow(http->request_arena, http->headers, &http->header_capacity, http->header_count, sizeof *http->headers);
+    http->headers[http->header_count++] = (HttpHeader){ name, value };
+    return 0;
+}
+
+// on_headers_complete requires a served method, HTTP/1, one Host, which HTTP/1.1
+// makes mandatory (RFC 9112 3.2), and no transfer coding but a single chunked;
+// llhttp joins repeated fields into one list. HTTP/1.0 has no transfer
+// codings, so one there is faulty framing (RFC 9112 6.1).
+static int on_headers_complete(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    http->in_trailer = true;
+    if (!method_served(S(llhttp_method_name((llhttp_method_t)llhttp_get_method(parser))))) {
+        return reject(http, 501);
+    }
+    if (parser->http_major != 1) {
+        return reject(http, 505);
+    }
+    bool host_required = parser->http_minor >= 1;
+    if (http->host_count > 1 || (host_required && http->host_count == 0)) {
+        return reject(http, 400);
+    }
+    if (http->transfer_encoding_count > 0 && !host_required) {
+        return reject(http, 400);
+    }
+    if (http->transfer_encoding_count > 0 && !(http->transfer_encoding_count == 1 && http->chunked)) {
+        return reject(http, 501);
+    }
+    if (parser->content_length > http->limits.max_body_bytes) {
+        return reject(http, 413);
+    }
+    bool has_body = http->chunked || parser->content_length > 0;
+    if (http->expects_continue && host_required && has_body) {
+        str_builder_append(&http->output, S("HTTP/1.1 100 Continue\r\n\r\n"));
+    }
+    return 0;
+}
+
+static int on_chunk_extension_name(llhttp_t *parser, const char *at, size_t length)
+{
+    Http1 *http = parser->data;
+    http->extension_name_bytes += length;
+    return 0;
+}
+
+// on_chunk_extension_name_complete refuses an empty name, which llhttp lets through.
+static int on_chunk_extension_name_complete(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    bool empty = http->extension_name_bytes == 0;
+    http->extension_name_bytes = 0;
+    return empty ? reject(http, 400) : 0;
+}
+
+static int on_body(llhttp_t *parser, const char *at, size_t length)
+{
+    Http1 *http = parser->data;
+    http->body_bytes += length;
+    if (http->body_bytes > http->limits.max_body_bytes) {
+        return reject(http, 413);
+    }
+    str_builder_append(&http->body, (String){ at, length });
+    return 0;
+}
+
+// on_message_complete holds the request and pauses the parser, so
+// http1_feed sees where the next request starts.
+static int on_message_complete(llhttp_t *parser)
+{
+    Http1 *http = parser->data;
+    String target = str_builder_finish(&http->url);
+    String path = target;
+    String query = { 0 };
+    str_cut(target, '?', &path, &query);
+    http->request = (HttpServerRequest){
+        .method = S(llhttp_method_name((llhttp_method_t)llhttp_get_method(parser))),
+        .target = target,
+        .path = path,
+        .query = query,
+        .headers = http->headers,
+        .header_count = http->header_count,
+        .body = str_builder_finish(&http->body),
+        .version_minor = parser->http_minor,
+    };
+    http->closing = llhttp_should_keep_alive(parser) != 1;
+    http->awaiting_response = true;
+    http->between_messages = true;
+    http->line_end_bytes = 0;
+    return HPE_PAUSED;
+}
+
+static const llhttp_settings_t SETTINGS = {
+    .on_message_begin = on_message_begin,
+    .on_url = on_url,
+    .on_url_complete = on_url_complete,
+    .on_header_field = on_header_field,
+    .on_header_field_complete = on_header_field_complete,
+    .on_header_value = on_header_value,
+    .on_header_value_complete = on_header_value_complete,
+    .on_headers_complete = on_headers_complete,
+    .on_body = on_body,
+    .on_chunk_extension_name = on_chunk_extension_name,
+    .on_chunk_extension_name_complete = on_chunk_extension_name_complete,
+    .on_message_complete = on_message_complete,
+};
+
+Http1 *http1_create(HttpServerLimits limits)
+{
+    Arena *arena = arena_create(0);
+    Http1 *http = arena_push(arena, sizeof *http);
+    *http = (Http1){
+        .arena = arena,
+        .request_arena = arena_create(0),
+        .limits = limits,
+        .between_messages = true,
+    };
+    http->output = str_builder_create(http->request_arena, OUTPUT_CAPACITY);
+    llhttp_init(&http->parser, HTTP_REQUEST, &SETTINGS);
+    http->parser.data = http;
+    return http;
+}
+
+void http1_destroy(Http1 *http)
+{
+    arena_destroy(http->request_arena);
+    arena_destroy(http->arena);
+}
+
+// skip_empty_line follows the line ends that start data, which may only make up
+// one CRLF, and says whether they do so far.
+static bool skip_empty_line(Http1 *http, String data)
+{
+    static const char CRLF[] = "\r\n";
+    size_t i = 0;
+    for (; i < data.len && (data.data[i] == '\r' || data.data[i] == '\n'); i++) {
+        if (http->line_end_bytes == MAX_LINE_END_BYTES || data.data[i] != CRLF[http->line_end_bytes]) {
+            return false;
+        }
+        http->line_end_bytes++;
+    }
+    return i == data.len || http->line_end_bytes != 1;
+}
+
+Http1Event http1_feed(Http1 *http, String data, size_t *used)
+{
+    assert(!http->awaiting_response && !http->closing);
+    *used = data.len;
+    // Between requests llhttp is still paused at the last one, where a close is no error.
+    if (data.len == 0) {
+        llhttp_errno_t result = http->between_messages ? HPE_OK : llhttp_finish(&http->parser);
+        if (result != HPE_OK) {
+            append_rejection(http, S(llhttp_errno_name(result)));
+        }
+        return HTTP1_CLOSE;
+    }
+    if (http->between_messages && !skip_empty_line(http, data)) {
+        append_rejection(http, S("more than one empty line"));
+        return HTTP1_CLOSE;
+    }
+    llhttp_errno_t result = llhttp_execute(&http->parser, data.data, data.len);
+    if (result == HPE_OK) {
+        return HTTP1_MORE;
+    }
+    if (result == HPE_PAUSED) {
+        *used = (size_t)(llhttp_get_error_pos(&http->parser) - data.data);
+        llhttp_resume(&http->parser);
+        return HTTP1_REQUEST;
+    }
+    if (result != HPE_PAUSED_UPGRADE) {
+        append_rejection(http, S(llhttp_errno_name(result)));
+    }
+    return HTTP1_CLOSE;
+}
+
+const HttpServerRequest *http1_request(const Http1 *http)
+{
+    assert(http->awaiting_response);
+    return &http->request;
+}
+
+Arena *http1_arena(Http1 *http)
+{
+    return http->request_arena;
+}
+
+static bool response_valid(const HttpServerResponse *response)
+{
+    assert(response->status >= 200 && response->status <= 599);
+    for (size_t i = 0; i < response->header_count; i++) {
+        String name = response->headers[i].name;
+        assert(!str_equal_ignore_case(name, S("Content-Length")) && !str_equal_ignore_case(name, S("Connection")) &&
+               !str_equal_ignore_case(name, S("Transfer-Encoding")) && !str_equal_ignore_case(name, S("Date")));
+        if (!field_name_valid(name) || !field_value_valid(response->headers[i].value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool http1_respond(Http1 *http, const HttpServerResponse *response, bool close)
+{
+    assert(http->awaiting_response);
+    http->awaiting_response = false;
+    static const HttpServerResponse FAILED = { .status = 500 };
+    if (response == nullptr || !response_valid(response)) {
+        response = &FAILED;
+    }
+    bool keep_alive = !close && !http->closing;
+    append_response(http, response, keep_alive);
+    http->closing = !keep_alive;
+    return keep_alive;
+}
+
+String http1_take_output(Http1 *http)
+{
+    String output = { http->output.data + http->taken, http->output.len - http->taken };
+    http->taken = http->output.len;
+    return output;
+}
+
+bool http1_idle(const Http1 *http)
+{
+    return http->between_messages && http->line_end_bytes == 0 && !http->awaiting_response;
+}

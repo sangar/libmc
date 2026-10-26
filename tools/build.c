@@ -110,6 +110,8 @@ static const char *const ZLIB_DIRECTORIES[] = { "deps/zlib" };
 static const char *const CACERT_DIRECTORIES[] = { "deps/cacert" };
 static const char *const MD4C_DIRECTORIES[] = { "deps/md4c" };
 static const char *const EXPAT_DIRECTORIES[] = { "deps/expat/lib" };
+static const char *const LLHTTP_DIRECTORIES[] = { "deps/llhttp/src" };
+static const char *const LLHTTP_FLAGS[] = { "-std=c11", "-w", "-Ideps/llhttp/include" };
 // xmltok.c includes xmltok_impl.c and xmltok_ns.c, which are kept in lib/included so they are not compiled alone.
 static const char *const EXPAT_FLAGS[] = { "-std=c11", "-w", "-Isrc/encoding", "-Ideps/expat/lib/included" };
 // HAVE_UNISTD_H is what zlib's configure step finds on macOS and Linux.
@@ -130,7 +132,8 @@ static const char *const CURL_FLAGS[] = {
 // server that answers HTTP/2.
 static const char *const LIBMC_FLAGS[] = {
     "-Iinclude", "-Ideps/cyaml", "-Ideps/utf8proc", "-Ideps/yyjson", "-Ideps/curl/include", "-DCURL_STATICLIB",
-    "-Ideps/cacert", "-Ideps/md4c", "-Ideps/expat/lib", MBEDTLS_PUBLIC_FLAGS, NGHTTP2_PUBLIC_FLAGS,
+    "-Ideps/cacert", "-Ideps/md4c", "-Ideps/expat/lib", "-Ideps/llhttp/include", MBEDTLS_PUBLIC_FLAGS,
+    NGHTTP2_PUBLIC_FLAGS,
 };
 
 static const Dependency DEPENDENCIES[] = {
@@ -152,6 +155,8 @@ static const Dependency DEPENDENCIES[] = {
       sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
     { EXPAT_DIRECTORIES, sizeof EXPAT_DIRECTORIES / sizeof *EXPAT_DIRECTORIES, EXPAT_FLAGS,
       sizeof EXPAT_FLAGS / sizeof *EXPAT_FLAGS, false },
+    { LLHTTP_DIRECTORIES, sizeof LLHTTP_DIRECTORIES / sizeof *LLHTTP_DIRECTORIES, LLHTTP_FLAGS,
+      sizeof LLHTTP_FLAGS / sizeof *LLHTTP_FLAGS, false },
     { CURL_DIRECTORIES, sizeof CURL_DIRECTORIES / sizeof *CURL_DIRECTORIES, CURL_FLAGS,
       sizeof CURL_FLAGS / sizeof *CURL_FLAGS, true },
 };
@@ -160,7 +165,7 @@ static const Dependency DEPENDENCIES[] = {
 static const char *const HEADER_DIRECTORIES[] = {
     "deps/cyaml", "deps/utf8proc", "deps/yyjson", "deps/curl/include/curl", "deps/mbedtls/include/mbedtls",
     "deps/mbedtls/tf-psa-crypto/include/psa", "deps/nghttp2/lib/includes/nghttp2", "deps/zlib", "deps/cacert",
-    "deps/md4c", "deps/expat/lib", "src/encoding", "src/net",
+    "deps/md4c", "deps/expat/lib", "deps/llhttp/include", "src/encoding", "src/net",
 };
 
 static void command_push(Command *command, const char *item)
