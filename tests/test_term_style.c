@@ -11,6 +11,8 @@ static void test_color_depth(Test *test)
     ColorEnvironment with = terminal;
     with.term = S("xterm-256color");
     test_check(test, color_depth_of(with) == COLOR_DEPTH_256, "TERM with 256color");
+    with.term = S("xterm-kitty");
+    test_check(test, color_depth_of(with) == COLOR_DEPTH_TRUE, "a true-colour terminal by TERM");
     with.colorterm = S("truecolor");
     test_check(test, color_depth_of(with) == COLOR_DEPTH_TRUE, "COLORTERM=truecolor");
     with.no_color = S("1");

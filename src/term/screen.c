@@ -69,6 +69,16 @@ Cell *screen_cell(Screen *screen, int x, int y)
     return &screen->cells[(size_t)y * (size_t)screen->width + (size_t)x];
 }
 
+Rect rect_inner(Rect rect)
+{
+    return (Rect){ rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2 };
+}
+
+bool rect_contains(Rect rect, int x, int y)
+{
+    return x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
+}
+
 void screen_paint(Screen *screen, Rect rect, Rgb bg)
 {
     for (int y = rect.y; y < rect.y + rect.height; y++) {

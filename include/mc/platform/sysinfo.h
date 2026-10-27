@@ -18,6 +18,13 @@ typedef struct CpuTicks {
     uint64_t total;
 } CpuTicks;
 
+// cpu_busy_share is the share of the time between two samples a core was
+// busy, 0 to 1; 0 when the counters went backwards or did not move.
+float cpu_busy_share(CpuTicks before, CpuTicks after);
+// counter_rate is how much a cumulative counter grew per second; 0 when it
+// went backwards, as after a reset.
+double counter_rate(uint64_t before, uint64_t after, double seconds);
+
 typedef struct SystemSample {
     size_t core_count;
     // cpu is every core together; cores holds the first SYSINFO_MAX_CORES.
