@@ -7,6 +7,7 @@
 #include "mc/platform/platform.h"
 #include "mc/platform/poll.h"
 #include "http1.h"
+#include "http2.h"
 #include "tls_session.h"
 
 enum { RECEIVE_BUFFER_BYTES = 16384, MAX_READY = 64, MAX_SWEEP_MS = 1000, NS_PER_MS = 1000000 };
@@ -24,14 +25,16 @@ typedef struct Loop Loop;
 typedef struct Connection {
     Arena *arena;
     Loop *loop;
-    Http1 *http;
+    Http1 *http;  // HTTP/1.1, until ALPN chooses h2
+    Http2 *http2; // HTTP/2 once ALPN chose it
+    bool protocol_chosen;
     int fd;
     TlsSession *tls; // nullptr on a plain connection
     PollInterest interest;
     char *input;
     String pending; // received and not yet parsed, in input
     String output;  // not yet sent
-    bool busy;      // a worker is running the handler
+    size_t in_flight; // requests a worker holds; HTTP/1.1 has at most one
     bool closing;   // close once the output is sent
     bool peer_closed;
     bool closed;
@@ -53,6 +56,7 @@ typedef struct Exchange {
     HttpServerRequest request;
     HttpServerResponse response;
     bool failed;
+    Http2Stream *stream; // the request's stream on HTTP/2, nullptr on HTTP/1.1
 } Exchange;
 
 // Loop is an event loop thread. Workers hand exchanges back through done,
@@ -110,12 +114,23 @@ static void connection_close(Connection *connection)
     loop->connection_count--;
 }
 
+// connections_free_closed frees the closed connections no worker still answers on.
 static void connections_free_closed(Loop *loop)
 {
-    while (loop->closed != nullptr) {
-        Connection *connection = loop->closed;
-        loop->closed = connection->next;
-        http1_destroy(connection->http);
+    Connection **link = &loop->closed;
+    while (*link != nullptr) {
+        Connection *connection = *link;
+        if (connection->in_flight > 0) {
+            link = &connection->next;
+            continue;
+        }
+        *link = connection->next;
+        if (connection->http != nullptr) {
+            http1_destroy(connection->http);
+        }
+        if (connection->http2 != nullptr) {
+            http2_destroy(connection->http2);
+        }
         arena_destroy(connection->arena);
     }
 }
@@ -149,9 +164,9 @@ static void run_exchange(void *argument)
     poller_wake(loop->poller);
 }
 
-static void start_exchange(Connection *connection)
+static void start_exchange(Connection *connection, Arena *arena, const HttpServerRequest *request,
+                           Http2Stream *stream)
 {
-    Arena *arena = http1_arena(connection->http);
     Exchange *exchange = arena_push(arena, sizeof *exchange);
     const HttpServerConfig *config = &connection->loop->server->config;
     *exchange = (Exchange){
@@ -160,10 +175,11 @@ static void start_exchange(Connection *connection)
         .handler = config->handler,
         .context = config->context,
         .arena = arena,
-        .request = *http1_request(connection->http),
+        .request = *request,
+        .stream = stream,
     };
     exchange->task = (Task){ .run = run_exchange, .argument = exchange };
-    connection->busy = true;
+    connection->in_flight++;
     connection->deadline_ns = 0;
     threadpool_submit(connection->loop->server->workers, &exchange->task);
 }
@@ -244,8 +260,38 @@ static bool receive_input(Connection *connection)
     return false;
 }
 
+// choose_protocol switches to HTTP/2 when the TLS handshake chose it, which
+// it has once the first bytes after it arrive.
+static void choose_protocol(Connection *connection)
+{
+    connection->protocol_chosen = true;
+    if (connection->tls != nullptr && str_equal(tls_session_protocol(connection->tls), S("h2"))) {
+        http1_destroy(connection->http);
+        connection->http = nullptr;
+        connection->http2 = http2_create(connection->loop->server->config.limits);
+    }
+}
+
+static void parse_pending_http2(Connection *connection)
+{
+    bool open = http2_feed(connection->http2, connection->pending);
+    connection->pending = (String){ 0 };
+    Http2Request request;
+    while (http2_next_request(connection->http2, &request)) {
+        start_exchange(connection, request.arena, request.request, request.stream);
+    }
+    connection->closing = connection->closing || !open;
+}
+
 static void parse_pending(Connection *connection)
 {
+    if (!connection->protocol_chosen) {
+        choose_protocol(connection);
+    }
+    if (connection->http2 != nullptr) {
+        parse_pending_http2(connection);
+        return;
+    }
     size_t used = 0;
     Http1Event event = http1_feed(connection->http, connection->pending, &used);
     connection->pending = str_slice(connection->pending, used, connection->pending.len);
@@ -254,7 +300,7 @@ static void parse_pending(Connection *connection)
     case HTTP1_MORE:
         break;
     case HTTP1_REQUEST:
-        start_exchange(connection);
+        start_exchange(connection, http1_arena(connection->http), http1_request(connection->http), nullptr);
         break;
     case HTTP1_CLOSE:
         connection->closing = true;
@@ -267,17 +313,23 @@ static void parse_pending(Connection *connection)
 static void connection_advance(Connection *connection)
 {
     while (!connection->closed) {
+        if (connection->http2 != nullptr && connection->output.len == 0) {
+            connection->output = http2_take_output(connection->http2);
+        }
         if (connection->output.len > 0) {
             if (!send_output(connection)) {
                 return;
             }
             continue;
         }
-        if (connection->busy) {
+        // HTTP/1.1 answers one request at a time; HTTP/2 reads on while handlers run.
+        bool waiting = connection->in_flight > 0 &&
+                       (connection->http != nullptr || connection->closing || http2_done(connection->http2));
+        if (waiting) {
             connection_watch(connection, POLL_NONE);
             return;
         }
-        if (connection->closing) {
+        if (connection->closing || (connection->http2 != nullptr && http2_done(connection->http2))) {
             connection_close(connection);
             return;
         }
@@ -332,11 +384,22 @@ static void respond(Exchange *exchange)
 {
     Connection *connection = exchange->connection;
     Loop *loop = connection->loop;
-    connection->busy = false;
-    bool open = http1_respond(connection->http, exchange->failed ? nullptr : &exchange->response, loop->stopping);
-    connection->output = http1_take_output(connection->http);
-    connection->closing = !open;
-    connection->deadline_ns = clock_monotonic_ns() + timeout_ns(loop);
+    const HttpServerResponse *response = exchange->failed ? nullptr : &exchange->response;
+    connection->in_flight--;
+    // The exchange lives in the stream's arena, which answering may free.
+    if (exchange->stream != nullptr) {
+        http2_respond(connection->http2, exchange->stream, response);
+    } else {
+        bool open = http1_respond(connection->http, response, loop->stopping);
+        connection->output = http1_take_output(connection->http);
+        connection->closing = !open;
+    }
+    if (connection->closed) {
+        return;
+    }
+    if (connection->in_flight == 0) {
+        connection->deadline_ns = clock_monotonic_ns() + timeout_ns(loop);
+    }
     connection_advance(connection);
 }
 
@@ -349,8 +412,13 @@ static void stop(Loop *loop)
     Connection *next = nullptr;
     for (Connection *connection = loop->connections; connection != nullptr; connection = next) {
         next = connection->next;
-        if (!connection->busy && connection->output.len == 0 && connection->pending.len == 0 &&
-            http1_idle(connection->http)) {
+        if (connection->http2 != nullptr) {
+            // Requests already started finish; no new ones are read.
+            http2_shutdown(connection->http2);
+            connection->closing = true;
+            connection_advance(connection);
+        } else if (connection->in_flight == 0 && connection->output.len == 0 && connection->pending.len == 0 &&
+                   http1_idle(connection->http)) {
             connection_close(connection);
         }
     }
@@ -393,7 +461,7 @@ static void *loop_run(void *argument)
     void *ready[MAX_READY];
     int sweep_ms = (int)(loop->server->config.limits.timeout_ms < MAX_SWEEP_MS ? loop->server->config.limits.timeout_ms
                                                                                 : MAX_SWEEP_MS);
-    while (!loop->stopping || loop->connection_count > 0) {
+    while (!loop->stopping || loop->connection_count > 0 || loop->closed != nullptr) {
         size_t count = poller_wait(loop->poller, ready, MAX_READY, sweep_ms);
         for (size_t i = 0; i < count; i++) {
             if (ready[i] == loop) {
