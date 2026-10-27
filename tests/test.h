@@ -50,9 +50,19 @@ extern const TestCase HTTP_TESTS[];
 extern const TestCase SMTP_TESTS[];
 extern const TestCase S3_TESTS[];
 extern const TestCase FTP_TESTS[];
+extern const TestCase TERM_STYLE_TESTS[];
+extern const TestCase TERM_ANSI_TESTS[];
+extern const TestCase TERM_ANIMATION_TESTS[];
+extern const TestCase TERM_LIVE_TESTS[];
+extern const TestCase TERM_INPUT_TESTS[];
+extern const TestCase TERM_LIST_TESTS[];
+extern const TestCase TERM_LAYOUT_TESTS[];
+extern const TestCase TERM_SCREEN_TESTS[];
+extern const TestCase TERM_LOG_TESTS[];
 extern const AbortCase ABORT_CASES[];
 
 // Abort cases that live with the tests that run them.
 void terminal_round_trip(void);
 void signal_watch_round_trip(void);
 void reaper_round_trip(void);
+void children_round_trip(void);
