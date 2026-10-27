@@ -159,7 +159,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/encoding/gzip.h` | gzip compression with an optional header comment, and decompression bounded in size, on zlib |
 | | `mc/encoding/dotenv.h` | `.env` files into `NAME=value` entries, with quotes and comments and no expansion |
 | | `mc/encoding/markdown.h` | CommonMark with GitHub's tables, task lists, strikethrough and autolinks to HTML, on md4c; raw HTML and script links shown as text unless allowed |
-| | `mc/encoding/xml.h` | XML 1.0 as start tags, end tags and text, on Expat, with entity expansion bounded and external entities never loaded |
+| | `mc/encoding/xml.h` | XML 1.0 as start tags, end tags and text, on Expat, with entity expansion bounded and external entities never loaded; documents written with text and attributes escaped |
 | | `mc/encoding/csv.h` | RFC 4180 records read one at a time: quoted fields with line breaks and `""`, CRLF or LF, a byte order mark; fields are views into the text |
 | net | `mc/net/http.h` | HTTPS requests on libcurl: HTTP/2 where the server offers it, gzip and deflate decoded, allowed hosts checked on every redirect, limits on time and size, bodies streamed from and to files, cancellation, Mozilla's trusted roots where the system has none |
 | | `mc/net/smtp.h` | Mail over SMTPS or STARTTLS: from, to, cc and bcc, UTF-8 subject and names, text with an HTML alternative, attachments |
