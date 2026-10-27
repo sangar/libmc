@@ -642,16 +642,11 @@ Error file_set_mtime(String path, int64_t mtime_ns, Err *err)
     return utimensat(AT_FDCWD, cpath.text, times, 0) == 0 ? ERR_OK : posix_fail_errno(err, "set mtime %s", cpath.text);
 }
 
-Error file_read_all(Arena *arena, String path, String *contents, Err *err)
+Error file_read_to_end(Arena *arena, int fd, String *contents, Err *err)
 {
     *contents = S("");
-    int fd;
-    Error e = file_open_read(path, &fd, err);
-    if (e != ERR_OK) {
-        return e;
-    }
     FileInfo info;
-    e = file_info_fd(fd, &info, err);
+    Error e = file_info_fd(fd, &info, err);
     size_t capacity = e == ERR_OK && info.size > 0 ? (size_t)info.size + 1 : 4096;
     char *data = arena_push_aligned(arena, capacity, 1);
     size_t len = 0;
@@ -677,12 +672,27 @@ Error file_read_all(Arena *arena, String path, String *contents, Err *err)
         }
         len += got;
     }
+    if (e != ERR_OK) {
+        return e;
+    }
+    data[len] = '\0';
+    *contents = (String){ .data = data, .len = len };
+    return ERR_OK;
+}
+
+Error file_read_all(Arena *arena, String path, String *contents, Err *err)
+{
+    *contents = S("");
+    int fd;
+    Error e = file_open_read(path, &fd, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    e = file_read_to_end(arena, fd, contents, err);
     file_close(fd);
     if (e != ERR_OK) {
         return err_wrap(err, e, "read %.*s", (int)path.len, path.data);
     }
-    data[len] = '\0';
-    *contents = (String){ .data = data, .len = len };
     return ERR_OK;
 }
 
@@ -1344,6 +1354,30 @@ static bool disable_sigpipe(int fd)
     return e;
 }
 
+// default_signals gives the child no blocked signals and the default action
+// for every signal this library or its caller may change, so a caller that
+// blocked them, as signals_block does, still starts children that an
+// interrupt from the terminal ends. flags are more POSIX_SPAWN_* flags.
+[[nodiscard]] static int default_signals(posix_spawnattr_t *attributes, short flags)
+{
+    sigset_t none;
+    sigemptyset(&none);
+    sigset_t defaults;
+    sigemptyset(&defaults);
+    const int changed[] = { SIGINT, SIGTERM, SIGHUP, SIGPIPE, SIGWINCH, SIGCHLD };
+    for (size_t i = 0; i < countof(changed); i++) {
+        sigaddset(&defaults, changed[i]);
+    }
+    int rc = posix_spawnattr_setsigmask(attributes, &none);
+    if (rc == 0) {
+        rc = posix_spawnattr_setsigdefault(attributes, &defaults);
+    }
+    if (rc == 0) {
+        rc = posix_spawnattr_setflags(attributes, (short)(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | flags));
+    }
+    return rc;
+}
+
 Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResult *result, Err *err)
 {
     *result = (ProcessResult){ .stdout_text = S(""), .stderr_text = S("") };
@@ -1368,11 +1402,19 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
     char **items = build_argv(arena, argv);
     pid_t pid;
     posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
     int rc = posix_spawn_file_actions_init(&actions);
     if (rc == 0) {
-        rc = redirect_child(&actions, in_pipe[0], out_pipe[1], err_pipe[1]);
+        rc = posix_spawnattr_init(&attributes);
         if (rc == 0) {
-            rc = posix_spawnp(&pid, items[0], &actions, nullptr, items, environ);
+            rc = redirect_child(&actions, in_pipe[0], out_pipe[1], err_pipe[1]);
+            if (rc == 0) {
+                rc = default_signals(&attributes, 0);
+            }
+            if (rc == 0) {
+                rc = posix_spawnp(&pid, items[0], &actions, &attributes, items, environ);
+            }
+            posix_spawnattr_destroy(&attributes);
         }
         posix_spawn_file_actions_destroy(&actions);
     }
@@ -1411,7 +1453,15 @@ Error process_run_interactive(Arena *scratch, StringList argv, int *exit_code, E
     ArenaMark mark = arena_mark(scratch);
     char **items = build_argv(scratch, argv);
     pid_t pid;
-    int rc = posix_spawnp(&pid, items[0], nullptr, nullptr, items, environ);
+    posix_spawnattr_t attributes;
+    int rc = posix_spawnattr_init(&attributes);
+    if (rc == 0) {
+        rc = default_signals(&attributes, 0);
+        if (rc == 0) {
+            rc = posix_spawnp(&pid, items[0], nullptr, &attributes, items, environ);
+        }
+        posix_spawnattr_destroy(&attributes);
+    }
     Error e = rc != 0 ? spawn_failed(err, rc, items[0]) : ERR_OK;
     arena_release(mark);
     if (e != ERR_OK) {
@@ -1551,27 +1601,11 @@ Error process_open_default(String path, Err *err)
     return ERR_OK;
 }
 
-// detach_child gives the child its own session, no blocked signals and the
-// default action for every signal this library or its caller may change.
+// detach_child gives the child its own session and the signal state of
+// default_signals.
 [[nodiscard]] static int detach_child(posix_spawnattr_t *attributes)
 {
-    sigset_t none;
-    sigemptyset(&none);
-    sigset_t defaults;
-    sigemptyset(&defaults);
-    const int changed[] = { SIGINT, SIGTERM, SIGHUP, SIGPIPE, SIGWINCH, SIGCHLD };
-    for (size_t i = 0; i < countof(changed); i++) {
-        sigaddset(&defaults, changed[i]);
-    }
-    int rc = posix_spawnattr_setsigmask(attributes, &none);
-    if (rc == 0) {
-        rc = posix_spawnattr_setsigdefault(attributes, &defaults);
-    }
-    if (rc == 0) {
-        rc = posix_spawnattr_setflags(attributes,
-                                      (short)(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSID));
-    }
-    return rc;
+    return default_signals(attributes, POSIX_SPAWN_SETSID);
 }
 
 Error process_spawn_detached(Arena *scratch, StringList argv, String output_path, int *pid, Err *err)
