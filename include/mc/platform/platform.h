@@ -110,6 +110,9 @@ bool file_find_upward(Arena *arena, String directory, StringList names, String *
 [[nodiscard]] Error file_write(int fd, String data, Err *err);
 [[nodiscard]] Error file_seek(int fd, int64_t offset, Err *err);
 [[nodiscard]] Error file_truncate(int fd, int64_t size, Err *err);
+// file_sync returns once what was written to fd is on stable storage, which
+// on macOS takes F_FULLFSYNC, as fsync there leaves it in the drive's cache.
+[[nodiscard]] Error file_sync(int fd, Err *err);
 [[nodiscard]] Error file_rename(String from, String to, Err *err);
 // file_remove is ERR_NOT_FOUND when nothing was there.
 [[nodiscard]] Error file_remove(String path, Err *err);
@@ -144,6 +147,9 @@ void file_unmap(FileMap map);
 // file or a broken symlink, is ERR_IO.
 [[nodiscard]] Error dir_create(String path, unsigned mode, Err *err);
 [[nodiscard]] Error dir_create_all(String path, unsigned mode, Err *err);
+// dir_sync makes the entries of the directory at path durable, such as a file
+// created or renamed into it, as file_sync does a file's contents.
+[[nodiscard]] Error dir_sync(String path, Err *err);
 [[nodiscard]] Error dir_remove(String path, Err *err);
 // dir_remove_all removes path and everything below it; a missing path is ERR_OK.
 [[nodiscard]] Error dir_remove_all(String path, Err *err);

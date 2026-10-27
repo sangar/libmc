@@ -98,6 +98,23 @@ static void file_read_all_sizes_its_buffer(Test *test)
     test_check(test, dir_remove_all(dir, &err) == ERR_OK, "remove the tree");
 }
 
+static void file_sync_makes_writes_durable(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    String dir;
+    test_check(test, dir_create_temp(a, S("mc-test-"), &dir, &err) == ERR_OK, "create a temp dir");
+    String file = path_join(a, dir, S("durable"));
+    int fd = -1;
+    test_check(test, file_create(file, 0600, &fd, &err) == ERR_OK, "create a file");
+    test_check(test, file_write(fd, S("blåbær"), &err) == ERR_OK && file_sync(fd, &err) == ERR_OK, err.msg);
+    file_close(fd);
+    test_check(test, dir_sync(dir, &err) == ERR_OK, err.msg);
+    test_check(test, dir_sync(path_join(a, dir, S("missing")), &err) == ERR_NOT_FOUND, "a missing directory");
+    test_check(test, dir_sync(file, &err) != ERR_OK, "a file is not a directory");
+    test_check(test, dir_remove_all(dir, &err) == ERR_OK, "remove the tree");
+}
+
 static void file_create_unique_validates_its_pattern(Test *test)
 {
     Arena *a = test->arena;
@@ -946,6 +963,7 @@ static void frames_cross_a_socket_whole(Test *test)
 const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
+    { "file_sync_makes_writes_durable", file_sync_makes_writes_durable },
     { "file_create_unique_validates_its_pattern", file_create_unique_validates_its_pattern },
     { "file_read_to_end_reads_a_stream", file_read_to_end_reads_a_stream },
     { "dir_create_needs_a_directory", dir_create_needs_a_directory },
