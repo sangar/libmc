@@ -78,6 +78,7 @@ static void unicode_normalizes_and_cases(Test *test)
 
     test_check_str(test, unicode_lower(a, S("BLÅBÆR ØL")), S("blåbær øl"), "lower maps ÆØÅ");
     test_check_str(test, unicode_upper(a, S("blåbær øl")), S("BLÅBÆR ØL"), "upper maps æøå");
+    test_check(test, unicode_lower_codepoint(U'Ø') == U'ø', "lower maps one code point");
     test_check_str(test, unicode_upper(a, S("ß")), S("ẞ"), "upper maps one code point to one");
     test_check(test, unicode_equal_ignore_case(S("ÆØÅ"), S("æøå")), "ÆØÅ equals æøå ignoring case");
     test_check(test, !unicode_equal_ignore_case(S("æøå"), S("æø")), "a longer string is not equal");

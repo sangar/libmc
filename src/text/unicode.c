@@ -5,7 +5,7 @@
 #include "mc/text/utf8.h"
 #include "utf8proc.h"
 
-static uint32_t lower(uint32_t codepoint)
+uint32_t unicode_lower_codepoint(uint32_t codepoint)
 {
     return (uint32_t)utf8proc_tolower((utf8proc_int32_t)codepoint);
 }
@@ -24,7 +24,7 @@ static uint32_t identity(uint32_t codepoint)
 // forms, such as σ and ς, fold together.
 static uint32_t fold(uint32_t codepoint)
 {
-    return lower(upper(codepoint));
+    return unicode_lower_codepoint(upper(codepoint));
 }
 
 static String map_code_points(Arena *arena, String s, uint32_t (*map)(uint32_t codepoint))
@@ -67,7 +67,7 @@ String unicode_nfc(Arena *arena, String s)
 
 String unicode_lower(Arena *arena, String s)
 {
-    return map_code_points(arena, s, lower);
+    return map_code_points(arena, s, unicode_lower_codepoint);
 }
 
 String unicode_upper(Arena *arena, String s)
