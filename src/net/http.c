@@ -77,13 +77,7 @@ void http_client_destroy(HttpClient *client)
 
 bool http_response_header(const HttpResponse *response, String name, String *value)
 {
-    for (size_t i = 0; i < response->header_count; i++) {
-        if (str_equal_ignore_case(response->headers[i].name, name)) {
-            *value = response->headers[i].value;
-            return true;
-        }
-    }
-    return false;
+    return http_header_find(response->headers, response->header_count, name, value);
 }
 
 // Hop collects one response: the body and headers curl hands over, in the
