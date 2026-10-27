@@ -375,6 +375,7 @@ static int on_message_complete(llhttp_t *parser)
         .headers = http->headers,
         .header_count = http->header_count,
         .body = str_builder_finish(&http->body),
+        .version_major = parser->http_major,
         .version_minor = parser->http_minor,
     };
     http->closing = llhttp_should_keep_alive(parser) != 1;

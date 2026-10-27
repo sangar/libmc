@@ -27,6 +27,10 @@ void tls_session_destroy(TlsSession *session);
 
 // tls_try_receive reads up to capacity bytes of plaintext that have arrived.
 TlsResult tls_try_receive(TlsSession *session, char *buffer, size_t capacity, size_t *got);
+// tls_session_protocol is the protocol ALPN chose, such as "h2", once the
+// handshake is done; empty when the client named none.
+String tls_session_protocol(const TlsSession *session);
+
 // tls_try_send sends what of data the connection takes now. After
 // TLS_WANT_READ or TLS_WANT_WRITE it must be called again with the same data.
 TlsResult tls_try_send(TlsSession *session, String data, size_t *sent);
