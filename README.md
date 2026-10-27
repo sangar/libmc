@@ -41,7 +41,9 @@ Then:
 | `./nob` | Debug library with AddressSanitizer and UBSan: `out/debug/libmc.a` |
 | `./nob release` | Optimised library: `out/release/libmc.a` |
 | `./nob test` | Builds and runs the tests under the sanitizers |
-| `./nob check` | Runs the `modern-c` contract checker, then the tests (see below) |
+| `./nob check` | Runs the `modern-c` contract checker, then the tests, then the tests again under ThreadSanitizer (see below) |
+| `./nob tsan` | Builds and runs the tests under ThreadSanitizer: `out/tsan/` |
+| `./nob fuzz` | Library instrumented for libFuzzer with AddressSanitizer and UBSan, for a consumer's fuzzer; `$CC` must be a clang that has libFuzzer: `out/fuzz/libmc.a` |
 | `./nob cross` | Release library for every platform: `out/<platform>/release/libmc.a` |
 | `./nob clean` | Removes `out/` |
 | `./nob hash <dir>` | Prints the `deps.lock` hash of a directory |
@@ -165,7 +167,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/net/smtp.h` | Mail over SMTPS or STARTTLS: from, to, cc and bcc, UTF-8 subject and names, text with an HTML alternative, attachments |
 | | `mc/net/http_server.h` | An HTTP/1.1 server for web apps on llhttp: event loops own the connections, worker threads run the handler; requests refused unless unambiguous, limits on size, connections and time, pipelining, `100-continue`, a lingering close so that a client still sending reads its response, a graceful stop, and the handler run without a socket for tests, over TLS when given a `TlsServer`, HTTP/2 on nghttp2 when the TLS handshake chooses it, responses gzipped with random padding against BREACH, and bodies streamed each way through a handler that reads uploads as they arrive and writes responses in pieces, with flow control holding back a client faster than its handler |
 | | `mc/net/static_files.h` | A directory's files for a web app: paths kept under the root, types by extension, ETags and 304, gzipped copies, and a memory cache bounded in total and per file |
-| | `mc/net/tls.h` | TLS for servers on mbedTLS: TLS 1.2 and 1.3 with the protocols ALPN offers, h2 and http/1.1 unless told, the certificate swapped while serving for renewals, connections over blocking sockets for servers that read and write in turn and for STARTTLS, and self-signed certificates for development |
+| | `mc/net/tls.h` | TLS for servers on mbedTLS: TLS 1.2 and 1.3 with the protocols ALPN offers, h2 and http/1.1 unless told, the certificate swapped while serving for renewals, connections over blocking sockets for servers that read and write in turn, for STARTTLS and for clients that speak their own protocol, and self-signed certificates for development |
 | | `mc/net/acme.h` | Certificates from Let's Encrypt or another ACME CA: HTTP-01 answered on port 80, which otherwise redirects to https, or TLS-ALPN-01 on port 443; account and certificate kept in a storage directory shared by processes, and renewed in the background two thirds into the certificate's lifetime |
 | | `mc/net/s3.h` | S3 and the stores that speak its API: objects in memory or files, multipart uploads, metadata, paged listing, retries with backoff, credentials found as the AWS tools find them; thread-safe, with pooled connections |
 | | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |

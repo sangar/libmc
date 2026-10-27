@@ -974,13 +974,60 @@ void http_server_destroy(HttpServer *server)
     server_free(server);
 }
 
+// answer_now runs the handler for request on this thread.
+static const HttpServerResponse *answer_now(const HttpServerConfig *config, Arena *arena,
+                                            const HttpServerRequest *request, HttpServerResponse *response)
+{
+    *response = (HttpServerResponse){ .status = 200 };
+    if (config->handler(config->context, arena, request, response, nullptr) != ERR_OK) {
+        return nullptr;
+    }
+    if (config->compression != nullptr) {
+        http_compress(arena, request, response, config->compression);
+    }
+    return response;
+}
+
+static void exchange_http2(const HttpServerConfig *config, StringList pieces, StringBuilder *output)
+{
+    Http2 *http = http2_create(config->limits, false);
+    bool open = true;
+    for (size_t i = 0; open && i <= pieces.count; i++) {
+        open = http2_feed(http, i < pieces.count ? pieces.items[i] : (String){ 0 });
+        Http2Request request;
+        while (http2_next_request(http, &request)) {
+            HttpServerResponse response;
+            http2_respond(http, request.stream, answer_now(config, request.arena, request.request, &response));
+        }
+        str_builder_append(output, http2_take_output(http));
+    }
+    http2_destroy(http);
+}
+
+// starts_http2 says whether pieces begin with HTTP/2's connection preface.
+static bool starts_http2(Arena *arena, StringList pieces)
+{
+    static const String PREFACE = { "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24 };
+    StringBuilder start = str_builder_create(arena, PREFACE.len);
+    for (size_t i = 0; i < pieces.count && start.len < PREFACE.len; i++) {
+        str_builder_append(&start, pieces.items[i]);
+    }
+    return str_starts_with(str_builder_finish(&start), PREFACE);
+}
+
 Error http_server_exchange(Arena *arena, const HttpServerConfig *config, StringList pieces, String *answer, Err *err)
 {
     Arena *scratch = arena_create(0);
     assert(config->handler != nullptr);
     HttpServerConfig resolved = config_with_defaults(scratch, config);
-    Http1 *http = http1_create(resolved.limits, nullptr, nullptr);
     StringBuilder output = str_builder_create(arena, 1024);
+    if (starts_http2(scratch, pieces)) {
+        exchange_http2(&resolved, pieces, &output);
+        *answer = str_builder_finish(&output);
+        arena_destroy(scratch);
+        return ERR_OK;
+    }
+    Http1 *http = http1_create(resolved.limits, nullptr, nullptr);
     bool open = true;
     for (size_t i = 0; open && i <= pieces.count; i++) {
         // After the last piece the client closes, which an empty piece tells http1_feed.
@@ -991,12 +1038,9 @@ Error http_server_exchange(Arena *arena, const HttpServerConfig *config, StringL
             data = str_slice(data, used, data.len);
             str_builder_append(&output, http1_take_output(http));
             if (event == HTTP1_REQUEST) {
-                HttpServerResponse response = { .status = 200 };
-                Error e = resolved.handler(resolved.context, http1_arena(http), http1_request(http), &response, nullptr);
-                if (e == ERR_OK && resolved.compression != nullptr) {
-                    http_compress(http1_arena(http), http1_request(http), &response, resolved.compression);
-                }
-                open = http1_respond(http, e == ERR_OK ? &response : nullptr, false);
+                HttpServerResponse response;
+                open = http1_respond(http, answer_now(&resolved, http1_arena(http), http1_request(http), &response),
+                                     false);
                 str_builder_append(&output, http1_take_output(http));
             }
             open = open && event != HTTP1_CLOSE;

@@ -172,12 +172,9 @@ static void server_free(TlsServer *server)
     arena_destroy(server->arena);
 }
 
-// protocol_list copies protocols as mbedTLS takes them, HTTP/2, HTTP/1.1 and
-// ACME's acme-tls/1 when there are none.
-static const char **protocol_list(Arena *arena, const TlsServerConfig *config)
+// protocol_list copies protocols as mbedTLS takes them.
+static const char **protocol_list(Arena *arena, const String *protocols, size_t count)
 {
-    const String *protocols = config->protocol_count > 0 ? config->protocols : HTTP_PROTOCOLS;
-    size_t count = config->protocol_count > 0 ? config->protocol_count : countof(HTTP_PROTOCOLS);
     const char **list = arena_push(arena, (count + 1) * sizeof *list);
     for (size_t i = 0; i < count; i++) {
         list[i] = str_cstr(arena, protocols[i]);
@@ -199,7 +196,9 @@ Error tls_server_create(const TlsServerConfig *config, TlsServer **server, Err *
     Arena *arena = arena_create(0);
     TlsServer *created = arena_push(arena, sizeof *created);
     created->arena = arena;
-    created->protocols = protocol_list(arena, config);
+    // With no protocols named, it offers HTTP/2, HTTP/1.1 and ACME's acme-tls/1.
+    created->protocols = config->protocol_count > 0 ? protocol_list(arena, config->protocols, config->protocol_count)
+                                                    : protocol_list(arena, HTTP_PROTOCOLS, countof(HTTP_PROTOCOLS));
     created->current = credentials;
     mutex_init(&created->mutex);
     mbedtls_ssl_config_init(&created->config);
@@ -491,15 +490,17 @@ static int blocking_receive(void *context, unsigned char *buffer, size_t capacit
     return net_receive(session->fd, buffer, capacity, &got, nullptr) == ERR_OK ? (int)got : MBEDTLS_ERR_NET_RECV_FAILED;
 }
 
-// session_start sets up the server's side of TLS on fd, reading and writing
-// it with waits when blocking, else as an event loop would.
-static TlsSession *session_start(Arena *arena, TlsServer *server, int fd, bool blocking)
+// session_start sets up TLS on fd with config, for server unless it is
+// nullptr, reading and writing with waits when blocking, else as an event
+// loop would.
+static TlsSession *session_start(Arena *arena, const mbedtls_ssl_config *config, TlsServer *server, int fd,
+                                 bool blocking)
 {
     TlsSession *session = arena_push(arena, sizeof *session);
     *session = (TlsSession){ .fd = fd, .server = server };
     mbedtls_ssl_init(&session->ssl);
     // Setup fails only when out of memory, which aborts everywhere else in libmc.
-    if (mbedtls_ssl_setup(&session->ssl, &server->config) != 0) {
+    if (mbedtls_ssl_setup(&session->ssl, config) != 0) {
         abort();
     }
     mbedtls_ssl_set_user_data_p(&session->ssl, session);
@@ -510,7 +511,7 @@ static TlsSession *session_start(Arena *arena, TlsServer *server, int fd, bool b
 
 TlsSession *tls_session_create(Arena *arena, TlsServer *server, int fd)
 {
-    return session_start(arena, server, fd, false);
+    return session_start(arena, &server->config, server, fd, false);
 }
 
 void tls_session_destroy(TlsSession *session)
@@ -562,19 +563,74 @@ TlsResult tls_try_send(TlsSession *session, String data, size_t *sent)
 struct TlsConnection {
     Arena *arena;
     TlsSession *session;
+    bool client; // and so owns what follows
+    mbedtls_ssl_config config;
+    mbedtls_x509_crt trusted;
 };
 
 Error tls_accept(TlsServer *server, int fd, TlsConnection **connection, Err *err)
 {
     Arena *arena = arena_create(0);
     TlsConnection *accepted = arena_push(arena, sizeof *accepted);
-    *accepted = (TlsConnection){ .arena = arena, .session = session_start(arena, server, fd, true) };
+    *accepted = (TlsConnection){ .arena = arena, .session = session_start(arena, &server->config, server, fd, true) };
     int status = mbedtls_ssl_handshake(&accepted->session->ssl);
     if (status != 0) {
         tls_close(accepted);
         return err_set(err, ERR_NETWORK, "tls: handshake failed: -0x%04x", (unsigned)-status);
     }
     *connection = accepted;
+    return ERR_OK;
+}
+
+// client_configure trusts config's certificates and offers its protocols.
+static int client_configure(TlsConnection *connection, const TlsClientConfig *config)
+{
+    size_t len = 0;
+    const unsigned char *pem = pem_bytes(connection->arena, config->ca_pem, &len);
+    int status = mbedtls_x509_crt_parse(&connection->trusted, pem, len);
+    if (status == 0) {
+        status = mbedtls_ssl_config_defaults(&connection->config, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                             MBEDTLS_SSL_PRESET_DEFAULT);
+    }
+    if (status != 0) {
+        return status;
+    }
+    mbedtls_ssl_conf_min_tls_version(&connection->config, MBEDTLS_SSL_VERSION_TLS1_2);
+    mbedtls_ssl_conf_authmode(&connection->config, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&connection->config, &connection->trusted, nullptr);
+    if (config->protocol_count == 0) {
+        return 0;
+    }
+    return mbedtls_ssl_conf_alpn_protocols(&connection->config,
+                                           protocol_list(connection->arena, config->protocols, config->protocol_count));
+}
+
+Error tls_connect(const TlsClientConfig *config, int fd, TlsConnection **connection, Err *err)
+{
+    Error e = crypto_start(err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    Arena *arena = arena_create(0);
+    TlsConnection *connected = arena_push(arena, sizeof *connected);
+    *connected = (TlsConnection){ .arena = arena, .client = true };
+    mbedtls_ssl_config_init(&connected->config);
+    mbedtls_x509_crt_init(&connected->trusted);
+    int status = client_configure(connected, config);
+    if (status != 0) {
+        tls_close(connected);
+        return tls_fail(err, "cannot configure the client", status);
+    }
+    connected->session = session_start(arena, &connected->config, nullptr, fd, true);
+    status = mbedtls_ssl_set_hostname(&connected->session->ssl, str_cstr(arena, config->host));
+    if (status == 0) {
+        status = mbedtls_ssl_handshake(&connected->session->ssl);
+    }
+    if (status != 0) {
+        tls_close(connected);
+        return err_set(err, ERR_NETWORK, "tls: handshake failed: -0x%04x", (unsigned)-status);
+    }
+    *connection = connected;
     return ERR_OK;
 }
 
@@ -615,7 +671,13 @@ Error tls_shutdown(TlsConnection *connection, Err *err)
 
 void tls_close(TlsConnection *connection)
 {
-    tls_session_destroy(connection->session);
+    if (connection->session != nullptr) {
+        tls_session_destroy(connection->session);
+    }
+    if (connection->client) {
+        mbedtls_ssl_config_free(&connection->config);
+        mbedtls_x509_crt_free(&connection->trusted);
+    }
     arena_destroy(connection->arena);
 }
 
