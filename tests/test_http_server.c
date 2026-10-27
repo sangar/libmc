@@ -4,14 +4,17 @@
 #include "mc/net/http_server.h"
 #include "mc/platform/platform.h"
 
+#include <string.h>
+
 // The tests run the server's handler without a socket through
 // http_server_exchange, and on 127.0.0.1 against raw sockets and libmc's own
 // HTTP client.
 
-enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000 };
+enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20 };
 
-// answer echoes the method, path and body; /slow sleeps first, /fail fails
-// and /bad-header sets a field value holding a line break.
+// answer echoes the method, path and body; /slow sleeps first, /fail fails,
+// /bad-header sets a field value holding a line break and /big answers more
+// than a socket buffer holds.
 [[nodiscard]] static Error answer(void *context, Arena *arena, const HttpServerRequest *request,
                                   HttpServerResponse *response, Err *err)
 {
@@ -26,6 +29,12 @@ enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000 };
                                ? (HttpHeader){ S("X-Injected"), S("a\r\nSet-Cookie: b") }
                                : (HttpHeader){ S("Content-Type"), S("text/plain; charset=utf-8") };
     response->header_count = 1;
+    if (str_equal(request->path, S("/big"))) {
+        char *big = arena_push(arena, BIG_BYTES);
+        memset(big, 'x', BIG_BYTES);
+        response->body = (String){ big, BIG_BYTES };
+        return ERR_OK;
+    }
     response->body = str_format(arena, "%.*s %.*s %.*s", (int)request->method.len, request->method.data,
                                 (int)request->path.len, request->path.data, (int)request->body.len, request->body.data);
     return ERR_OK;
@@ -209,6 +218,37 @@ static void http_server_closes_idle_clients(Test *test)
     http_server_destroy(server);
 }
 
+static size_t body_length(String reply)
+{
+    size_t header_end = 0;
+    return str_find(reply, S("\r\n\r\n"), &header_end) ? reply.len - header_end - 4 : 0;
+}
+
+static void http_server_sends_bodies_larger_than_the_socket_buffer(Test *test)
+{
+    HttpServer *server = start_server(test);
+    if (server == nullptr) {
+        return;
+    }
+    int fd = -1;
+    Err err = { 0 };
+    String port = str_format(test->arena, "%u", http_server_port(server));
+    test_check(test, net_connect(S("127.0.0.1"), port, 1000, &fd, &err) == ERR_OK, "connect");
+    StringBuilder reply = str_builder_create(test->arena, BIG_BYTES + 256);
+    if (net_set_timeouts(fd, RECEIVE_TIMEOUT_MS, &err) == ERR_OK &&
+        net_send(fd, S("GET /big HTTP/1.1\r\nHost: h\r\n\r\n"), &err) == ERR_OK) {
+        char buffer[65536];
+        size_t got = 0;
+        while (body_length(str_builder_finish(&reply)) < BIG_BYTES &&
+               net_receive(fd, buffer, sizeof buffer, &got, &err) == ERR_OK && got > 0) {
+            str_builder_append(&reply, (String){ buffer, got });
+        }
+    }
+    test_check(test, body_length(str_builder_finish(&reply)) == BIG_BYTES, "the whole body arrives");
+    net_close(fd);
+    http_server_destroy(server);
+}
+
 typedef struct SlowGet {
     Arena *arena;
     uint16_t port;
@@ -249,6 +289,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_continues_and_answers_head", http_server_continues_and_answers_head },
     { "http_server_serves_the_http_client", http_server_serves_the_http_client },
     { "http_server_runs_slow_handlers_aside", http_server_runs_slow_handlers_aside },
+    { "http_server_sends_bodies_larger_than_the_socket_buffer", http_server_sends_bodies_larger_than_the_socket_buffer },
     { "http_server_closes_idle_clients", http_server_closes_idle_clients },
     { "http_server_finishes_requests_when_stopped", http_server_finishes_requests_when_stopped },
     { nullptr, nullptr },

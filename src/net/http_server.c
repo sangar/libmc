@@ -163,7 +163,8 @@ static void start_exchange(Connection *connection)
     threadpool_submit(connection->loop->server->workers, &exchange->task);
 }
 
-// send_output reports whether all of the output went out.
+// send_output reports whether to try again: it sent some, and did not have to
+// wait or close.
 static bool send_output(Connection *connection)
 {
     size_t sent = 0;
@@ -171,7 +172,7 @@ static bool send_output(Connection *connection)
     case NET_DONE:
         connection->output = str_slice(connection->output, sent, connection->output.len);
         connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
-        return connection->output.len == 0;
+        return true;
     case NET_WOULD_BLOCK:
         connection_watch(connection, POLL_WRITE);
         return false;
