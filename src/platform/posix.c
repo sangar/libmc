@@ -2327,3 +2327,8 @@ void net_shutdown(int fd)
 {
     shutdown(fd, SHUT_RDWR);
 }
+
+void net_shutdown_write(int fd)
+{
+    shutdown(fd, SHUT_WR);
+}

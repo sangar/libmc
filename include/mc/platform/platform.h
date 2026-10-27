@@ -296,6 +296,9 @@ void net_close(int fd);
 // net_shutdown ends both directions of fd, which wakes a thread blocked in
 // net_receive on it. The descriptor stays open until net_close.
 void net_shutdown(int fd);
+// net_shutdown_write ends fd's sending side: the peer reads to the end of
+// what was sent, while fd can still receive.
+void net_shutdown_write(int fd);
 
 // NetResult is how far a call that does not wait got, for event loops on
 // mc/platform/poll.h.

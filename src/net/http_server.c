@@ -14,6 +14,13 @@
 
 enum { RECEIVE_BUFFER_BYTES = 16384, PIPE_BYTES = 65536, MAX_READY = 64, MAX_SWEEP_MS = 1000, NS_PER_MS = 1000000 };
 
+// A connection closed while its client may still be sending, such as an
+// upload refused unread, lingers: its sending side is shut and what arrives is
+// discarded, up to LINGER_BYTES, until the client closes or pauses for the
+// timeout. Closing at once would have the kernel answer those bytes with a
+// reset, which can reach the client before it reads the response.
+enum { LINGER_BYTES = 16 << 20 };
+
 static const HttpServerLimits DEFAULT_LIMITS = {
     .max_header_bytes = 8192,
     .max_body_bytes = 1 << 20,
@@ -40,6 +47,8 @@ struct Connection {
     size_t in_flight; // requests a worker holds; HTTP/1.1 has at most one
     HttpExchange *exchanges; // the streamed ones among them
     bool closing;   // close once the output is sent
+    bool lingering; // discarding input until the peer closes
+    size_t lingered;
     bool peer_closed;
     bool closed;
     int64_t deadline_ns; // 0 while the handler runs
@@ -608,10 +617,48 @@ static bool waiting_on_worker(Connection *connection)
     return full;
 }
 
+static void linger_start(Connection *connection)
+{
+    if (connection->tls != nullptr) {
+        tls_session_destroy(connection->tls);
+        connection->tls = nullptr;
+    }
+    net_shutdown_write(connection->fd);
+    connection->lingering = true;
+    connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
+}
+
+static void linger(Connection *connection)
+{
+    for (;;) {
+        size_t got = 0;
+        switch (net_try_receive(connection->fd, connection->input, RECEIVE_BUFFER_BYTES, &got)) {
+        case NET_DONE:
+            connection->lingered += got;
+            connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
+            if (connection->lingered >= LINGER_BYTES) {
+                connection_close(connection);
+                return;
+            }
+            break;
+        case NET_WOULD_BLOCK:
+            connection_watch(connection, POLL_READ);
+            return;
+        case NET_CLOSED:
+            connection_close(connection);
+            return;
+        }
+    }
+}
+
 // connection_advance moves the connection as far as it can go without
 // waiting: send, then parse what has arrived, then receive more.
 static void connection_advance(Connection *connection)
 {
+    if (connection->lingering) {
+        linger(connection);
+        return;
+    }
     while (!connection->closed) {
         pump_all(connection);
         if (connection->http2 != nullptr && connection->output.len == 0) {
@@ -634,7 +681,12 @@ static void connection_advance(Connection *connection)
             connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
         }
         if (connection->closing || (connection->http2 != nullptr && http2_done(connection->http2))) {
-            connection_close(connection);
+            if (connection->http != nullptr && !connection->peer_closed) {
+                linger_start(connection);
+                linger(connection);
+            } else {
+                connection_close(connection);
+            }
             return;
         }
         if (connection->pending.len == 0 && !connection->peer_closed && !receive_input(connection)) {
@@ -717,7 +769,9 @@ static void stop(Loop *loop)
     Connection *next = nullptr;
     for (Connection *connection = loop->connections; connection != nullptr; connection = next) {
         next = connection->next;
-        if (connection->http2 != nullptr) {
+        if (connection->lingering) {
+            connection_close(connection);
+        } else if (connection->http2 != nullptr) {
             // Requests already started finish; no new ones are read.
             http2_shutdown(connection->http2);
             connection->closing = true;
