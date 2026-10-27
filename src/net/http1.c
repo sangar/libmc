@@ -2,7 +2,6 @@
 
 #include <assert.h>
 #include <llhttp.h>
-#include <time.h>
 
 #include "mc/platform/platform.h"
 
@@ -152,20 +151,6 @@ static String reason_phrase(unsigned status)
     return S("");
 }
 
-// append_date writes the Date field in the IMF-fixdate form of RFC 9110 5.6.7,
-// with English names whatever the locale.
-static void append_date(StringBuilder *output)
-{
-    static const char *const DAYS[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-    static const char *const MONTHS[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    time_t now = (time_t)(clock_wall_ns() / 1000000000);
-    struct tm utc;
-    gmtime_r(&now, &utc);
-    str_builder_append_format(output, "Date: %s, %02d %s %04d %02d:%02d:%02d GMT\r\n", DAYS[utc.tm_wday], utc.tm_mday,
-                              MONTHS[utc.tm_mon], utc.tm_year + 1900, utc.tm_hour, utc.tm_min, utc.tm_sec);
-}
-
 static bool status_has_body(unsigned status)
 {
     return status != 204 && status != 304;
@@ -186,7 +171,8 @@ static void append_head(Http1 *http, unsigned status, const HttpHeader *headers,
 {
     String reason = reason_phrase(status);
     str_builder_append_format(&http->output, "HTTP/1.1 %u %.*s\r\n", status, (int)reason.len, reason.data);
-    append_date(&http->output);
+    String date = http_date(http->request_arena, clock_wall_ns());
+    str_builder_append_format(&http->output, "Date: %.*s\r\n", (int)date.len, date.data);
     for (size_t i = 0; i < header_count; i++) {
         HttpHeader header = headers[i];
         str_builder_append_format(&http->output, "%.*s: %.*s\r\n", (int)header.name.len, header.name.data,

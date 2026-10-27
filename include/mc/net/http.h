@@ -15,6 +15,13 @@ typedef struct HttpHeader {
     String value;
 } HttpHeader;
 
+// http_header_find finds the first of headers called name, ignoring ASCII case.
+bool http_header_find(const HttpHeader *headers, size_t header_count, String name, String *value);
+
+// http_date writes a Unix time as HTTP's Date and Last-Modified fields do, in
+// the IMF-fixdate form of RFC 9110 5.6.7: Sun, 06 Nov 1994 08:49:37 GMT.
+String http_date(Arena *arena, int64_t unix_nanoseconds);
+
 // HttpClientConfig holds what applies to every request. Zero values take the
 // default named beside each field.
 typedef struct HttpClientConfig {

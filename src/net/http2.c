@@ -9,7 +9,7 @@
 #include "mc/platform/platform.h"
 #include "mc/text/fmt.h"
 
-enum { MAX_CONCURRENT_STREAMS = 100, STREAM_WINDOW_BYTES = 65535, OUTPUT_CAPACITY = 16384, MAX_RESPONSE_HEADERS = 64, SECONDS_PER_DAY = 86400 };
+enum { MAX_CONCURRENT_STREAMS = 100, STREAM_WINDOW_BYTES = 65535, OUTPUT_CAPACITY = 16384, MAX_RESPONSE_HEADERS = 64 };
 
 struct Http2Stream {
     Http2 *http;
@@ -254,21 +254,6 @@ static nghttp2_nv field(String name, String value)
     return (nghttp2_nv){ (uint8_t *)name.data, (uint8_t *)value.data, name.len, value.len, NGHTTP2_NV_FLAG_NONE };
 }
 
-// date is now as an HTTP Date field writes it (RFC 9110 5.6.7).
-static String date(Arena *arena)
-{
-    static const char *const DAYS[] = { "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
-    static const char *const MONTHS[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    int64_t now = clock_wall_ns() / 1000000000;
-    int64_t days = now / SECONDS_PER_DAY;
-    int64_t seconds = now % SECONDS_PER_DAY;
-    CivilDate civil = civil_from_days(days);
-    return str_format(arena, "%s, %02u %s %04lld %02lld:%02lld:%02lld GMT", DAYS[days % 7], civil.day,
-                      MONTHS[civil.month - 1], (long long)civil.year, (long long)(seconds / 3600),
-                      (long long)(seconds / 60 % 60), (long long)(seconds % 60));
-}
-
 // field_allowed says whether a handler's field may go out in HTTP/2, which
 // has no connection-specific fields and lowercase names (RFC 9113 8.2).
 static bool field_allowed(String name)
@@ -329,7 +314,7 @@ static void submit_head(Http2 *http, Http2Stream *stream, unsigned status, const
     nghttp2_nv fields[MAX_RESPONSE_HEADERS + 3];
     size_t count = 0;
     fields[count++] = field(S(":status"), str_format(arena, "%u", status));
-    fields[count++] = field(S("date"), date(arena));
+    fields[count++] = field(S("date"), http_date(arena, clock_wall_ns()));
     if (status != 204 && status != 304 && content_length >= 0) {
         fields[count++] = field(S("content-length"), str_format(arena, "%lld", (long long)content_length));
     }
