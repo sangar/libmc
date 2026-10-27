@@ -1,5 +1,6 @@
 #include "test.h"
 
+#include "mc/encoding/gzip.h"
 #include "mc/net/http.h"
 #include "mc/net/http_server.h"
 #include "mc/net/tls.h"
@@ -15,8 +16,8 @@
 enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BYTES = 64 << 10, UPLOAD_BYTES = 64 << 10 };
 
 // answer echoes the method, path and body; /slow sleeps first, /fail fails,
-// /bad-header sets a field value holding a line break, and /version answers
-// the request's HTTP version.
+// /bad-header sets a field value holding a line break, /version answers
+// the request's HTTP version, and /page a few KB of text.
 [[nodiscard]] static Error answer(void *context, Arena *arena, const HttpServerRequest *request,
                                   HttpServerResponse *response, Err *err)
 {
@@ -39,6 +40,10 @@ enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BY
         response->body = (String){ big, big_bytes };
         return ERR_OK;
     }
+    if (str_equal(request->path, S("/page"))) {
+        response->body = str_repeat(arena, S("<p>blåbær og bringebær</p>\n"), 150);
+        return ERR_OK;
+    }
     if (str_equal(request->path, S("/version"))) {
         response->body = str_format(arena, "%u.%u", request->version_major, request->version_minor);
         return ERR_OK;
@@ -48,15 +53,61 @@ enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BY
     return ERR_OK;
 }
 
-static String exchange(Test *test, String request)
+static String exchange_with(Test *test, const HttpCompression *compression, String request)
 {
-    HttpServerConfig config = { .handler = answer };
+    HttpServerConfig config = { .handler = answer, .compression = compression };
     StringList pieces = { 0 };
     strlist_push(test->arena, &pieces, request);
     String reply = S("");
     Err err = { 0 };
     test_check(test, http_server_exchange(test->arena, &config, pieces, &reply, &err) == ERR_OK, "exchange");
     return reply;
+}
+
+static String exchange(Test *test, String request)
+{
+    return exchange_with(test, nullptr, request);
+}
+
+static const HttpCompression COMPRESSION = { .min_bytes = 1024, .jitter_bytes = 32, .skip_credentials = true };
+
+// gzipped_body gives a reply's body decompressed, or empty when it is not gzip.
+static String gzipped_body(Test *test, String reply)
+{
+    size_t end = 0;
+    String body = { 0 };
+    if (!str_contains(reply, S("Content-Encoding: gzip\r\n")) || !str_find(reply, S("\r\n\r\n"), &end) ||
+        gzip_decompress(test->arena, str_slice(reply, end + 4, reply.len), 1 << 20, &body, nullptr) != ERR_OK) {
+        return S("");
+    }
+    return body;
+}
+
+static void http_server_gzips_what_is_worth_it(Test *test)
+{
+    String page = str_repeat(test->arena, S("<p>blåbær og bringebær</p>\n"), 150);
+    String accepted = exchange_with(test, &COMPRESSION, S("GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: br, gzip\r\n\r\n"));
+    test_check_str(test, gzipped_body(test, accepted), page, "a page goes gzipped to a client that accepts it");
+    test_check(test, str_contains(accepted, S("Vary: Accept-Encoding\r\n")), "and says it varies");
+    static const char *const UNCOMPRESSED[] = {
+        "GET /page HTTP/1.1\r\nHost: h\r\n\r\n",
+        "GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip;q=0, *\r\n\r\n",
+        "GET /small HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip\r\n\r\n",
+        "GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip\r\nCookie: session=1\r\n\r\n",
+    };
+    for (size_t i = 0; i < countof(UNCOMPRESSED); i++) {
+        test_check(test, !str_contains(exchange_with(test, &COMPRESSION, S(UNCOMPRESSED[i])), S("Content-Encoding")),
+                   UNCOMPRESSED[i]);
+    }
+    test_check(test, !str_contains(exchange(test, S("GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip\r\n\r\n")),
+                                   S("Content-Encoding")),
+               "a server without compression sends as it is");
+    size_t first = accepted.len;
+    bool varies = false;
+    for (int i = 0; i < 9 && !varies; i++) {
+        varies = exchange_with(test, &COMPRESSION, S("GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip\r\n\r\n")).len != first;
+    }
+    test_check(test, varies, "padding varies the size against BREACH");
 }
 
 static void http_server_answers_pipelined_requests_in_order(Test *test)
@@ -418,6 +469,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_answers_pipelined_requests_in_order", http_server_answers_pipelined_requests_in_order },
     { "http_server_reports_the_http_version", http_server_reports_the_http_version },
     { "http_server_refuses_ambiguous_requests", http_server_refuses_ambiguous_requests },
+    { "http_server_gzips_what_is_worth_it", http_server_gzips_what_is_worth_it },
     { "http_server_answers_500_for_failures", http_server_answers_500_for_failures },
     { "http_server_continues_and_answers_head", http_server_continues_and_answers_head },
     { "http_server_serves_the_http_client", http_server_serves_the_http_client },
