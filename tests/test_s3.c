@@ -861,6 +861,140 @@ static void sigv4_verify_checks_the_aws_examples(Test *test)
     test_check_str(test, last, S("b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9"), "its last");
 }
 
+// Sent is a body as the client sent it, read back a few bytes at a time.
+typedef struct Sent {
+    String data;
+    size_t at;
+} Sent;
+
+[[nodiscard]] static Error read_sent(void *context, char *buffer, size_t capacity, size_t *got, Err *err)
+{
+    Sent *sent = context;
+    *got = min_size(min_size(capacity, 1000), sent->data.len - sent->at);
+    memcpy(buffer, sent->data.data + sent->at, *got);
+    sent->at += *got;
+    return ERR_OK;
+}
+
+// decode reads all of data through a SigV4Body, or as much as it passes.
+[[nodiscard]] static Error decode(Arena *arena, const SigV4Verified *verified, String data, SigV4Body *body, String *decoded)
+{
+    Sent sent = { data, 0 };
+    sigv4_body_init(body, arena, verified, read_sent, &sent);
+    StringBuilder out = str_builder_create(arena, data.len);
+    char buffer[3000];
+    size_t got = 0;
+    Error e;
+    while ((e = sigv4_body_read(body, buffer, sizeof buffer, &got, nullptr)) == ERR_OK && got > 0) {
+        str_builder_append(&out, (String){ buffer, got });
+    }
+    *decoded = str_builder_finish(&out);
+    return e;
+}
+
+// streaming_example is the verified PUT of S3's aws-chunked example.
+static SigV4Verified streaming_example(Arena *arena)
+{
+    const HttpHeader headers[] = {
+        { S("Host"), S("s3.amazonaws.com") },
+        { S("x-amz-date"), S("20130524T000000Z") },
+        { S("x-amz-storage-class"), S("REDUCED_REDUNDANCY") },
+        { S("x-amz-content-sha256"), S("STREAMING-AWS4-HMAC-SHA256-PAYLOAD") },
+        { S("Content-Encoding"), S("aws-chunked") },
+        { S("x-amz-decoded-content-length"), S("66560") },
+        { S("Content-Length"), S("66824") },
+        { S("Authorization"),
+          S("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+            "SignedHeaders=content-encoding;content-length;host;x-amz-content-sha256;x-amz-date;"
+            "x-amz-decoded-content-length;x-amz-storage-class,"
+            "Signature=4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9") },
+    };
+    SigV4Received put = { S("PUT"), S("/examplebucket/chunkObject.txt"), S(""), headers, countof(headers) };
+    SigV4Verified verified = { 0 };
+    unused(verify_example(arena, &put, S(EXAMPLE_SECRET), MAY_24_2013, &verified));
+    return verified;
+}
+
+static void sigv4_body_decodes_aws_chunked(Test *test)
+{
+    Arena *a = test->arena;
+    SigV4Verified verified = streaming_example(a);
+    String sixty_four_kib = str_repeat(a, S("a"), 65536);
+    String one_kib = str_repeat(a, S("a"), 1024);
+    String example = str_format(a,
+                                "10000;chunk-signature=ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648\r\n"
+                                "%s\r\n"
+                                "400;chunk-signature=0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497\r\n"
+                                "%s\r\n"
+                                "0;chunk-signature=b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9\r\n\r\n",
+                                sixty_four_kib.data, one_kib.data);
+    test_check(test, example.len == 66824, "the example's Content-Length");
+    SigV4Body body;
+    String decoded;
+    test_check(test, decode(a, &verified, example, &body, &decoded) == ERR_OK &&
+                         str_equal(decoded, str_concat(a, sixty_four_kib, one_kib)),
+               "S3's example, read in pieces across its chunks");
+    char *forged = arena_push(a, example.len);
+    memcpy(forged, example.data, example.len);
+    forged[70000 - 4000] = 'b';
+    test_check(test, decode(a, &verified, (String){ forged, example.len }, &body, &decoded) == ERR_PARSE &&
+                         body.problem == SIGV4_BODY_SIGNATURE_MISMATCH,
+               "a byte changed in a signed chunk");
+    test_check(test, decode(a, &verified, str_slice(example, 0, 66000), &body, &decoded) == ERR_PARSE &&
+                         body.problem == SIGV4_BODY_MALFORMED,
+               "a body cut short");
+
+    SigV4Verified unsigned_trailer = verified;
+    unsigned_trailer.payload = SIGV4_PAYLOAD_STREAMING_UNSIGNED_TRAILER;
+    String checksum = S("");
+    test_check(test, decode(a, &unsigned_trailer, S("5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n"), &body,
+                            &decoded) == ERR_OK &&
+                         str_equal(decoded, S("hello")) &&
+                         sigv4_body_trailer(&body, S("X-Amz-Checksum-Crc32"), &checksum) &&
+                         str_equal(checksum, S("NhCmhg==")),
+               "unsigned chunks and their trailer");
+    test_check(test, decode(a, &unsigned_trailer, S("zz\r\nhello\r\n0\r\n\r\n"), &body, &decoded) == ERR_PARSE &&
+                         body.problem == SIGV4_BODY_MALFORMED,
+               "a chunk size that is not hex");
+}
+
+static void sigv4_body_checks_a_signed_trailer(Test *test)
+{
+    Arena *a = test->arena;
+    SigV4Verified verified = streaming_example(a);
+    verified.payload = SIGV4_PAYLOAD_STREAMING_SIGNED_TRAILER;
+    String first = sigv4_chunk_signature(a, &verified, verified.seed_signature, sha256_hex(a, S("hello")));
+    String last = sigv4_chunk_signature(a, &verified, first, sha256_hex(a, S("")));
+    String to_sign = str_format(a, "AWS4-HMAC-SHA256-TRAILER\n20130524T000000Z\n20130524/us-east-1/s3/aws4_request\n%s\n%s",
+                                last.data, sha256_hex(a, S("x-amz-checksum-crc32:NhCmhg==\n")).data);
+    uint8_t digest[SHA256_LEN];
+    hmac_sha256(verified.signing_key, to_sign, digest);
+    String trailer_signature = hex_encode(a, digest, SHA256_LEN);
+    const char *format = "5;chunk-signature=%s\r\nhello\r\n0;chunk-signature=%s\r\n"
+                         "x-amz-checksum-crc32:NhCmhg==\r\nx-amz-trailer-signature:%s\r\n\r\n";
+    SigV4Body body;
+    String decoded;
+    test_check(test, decode(a, &verified, str_format(a, format, first.data, last.data, trailer_signature.data), &body,
+                            &decoded) == ERR_OK && str_equal(decoded, S("hello")),
+               "a trailer signed after the last chunk");
+    test_check(test, decode(a, &verified, str_format(a, format, first.data, last.data, first.data), &body, &decoded) ==
+                             ERR_PARSE && body.problem == SIGV4_BODY_SIGNATURE_MISMATCH,
+               "a trailer with another signature");
+}
+
+static void sigv4_body_checks_the_whole_body_hash(Test *test)
+{
+    Arena *a = test->arena;
+    SigV4Verified verified = { .payload = SIGV4_PAYLOAD_SHA256, .payload_hash = sha256_hex(a, S("blåbær")) };
+    SigV4Body body;
+    String decoded;
+    test_check(test, decode(a, &verified, S("blåbær"), &body, &decoded) == ERR_OK && str_equal(decoded, S("blåbær")),
+               "the body it was signed with");
+    test_check(test, decode(a, &verified, S("bringebær"), &body, &decoded) == ERR_PARSE &&
+                         body.problem == SIGV4_BODY_HASH_MISMATCH,
+               "another body");
+}
+
 const TestCase S3_TESTS[] = {
     { "s3_stores_reads_and_removes_objects", s3_stores_reads_and_removes_objects },
     { "s3_moves_files_in_parts", s3_moves_files_in_parts },
@@ -869,5 +1003,8 @@ const TestCase S3_TESTS[] = {
     { "s3_finds_credentials_like_the_aws_tools", s3_finds_credentials_like_the_aws_tools },
     { "s3_reaches_a_live_store", s3_reaches_a_live_store },
     { "sigv4_verify_checks_the_aws_examples", sigv4_verify_checks_the_aws_examples },
+    { "sigv4_body_decodes_aws_chunked", sigv4_body_decodes_aws_chunked },
+    { "sigv4_body_checks_a_signed_trailer", sigv4_body_checks_a_signed_trailer },
+    { "sigv4_body_checks_the_whole_body_hash", sigv4_body_checks_the_whole_body_hash },
     { nullptr, nullptr },
 };

@@ -1,9 +1,10 @@
 #include "mc/net/sigv4_verify.h"
 
 #include "mc/container/sort.h"
-#include "mc/crypto/sha256.h"
 #include "mc/crypto/sigv4.h"
 #include "mc/text/fmt.h"
+
+#include <string.h>
 
 enum {
     MAX_SKEW_SECONDS = 15 * 60,
@@ -322,4 +323,263 @@ String sigv4_chunk_signature(Arena *arena, const SigV4Verified *verified, String
                                 verified->scope.data, (int)previous_signature.len, previous_signature.data,
                                 (int)empty_hash.len, empty_hash.data, (int)chunk_sha256.len, chunk_sha256.data);
     return hex_hmac(arena, verified->signing_key, to_sign);
+}
+
+static bool signs_chunks(const SigV4Verified *verified)
+{
+    return verified->payload == SIGV4_PAYLOAD_STREAMING_SIGNED ||
+           verified->payload == SIGV4_PAYLOAD_STREAMING_SIGNED_TRAILER;
+}
+
+void sigv4_body_init(SigV4Body *body, Arena *arena, const SigV4Verified *verified, SigV4BodyRead read, void *context)
+{
+    *body = (SigV4Body){
+        .arena = arena,
+        .verified = verified,
+        .read = read,
+        .context = context,
+        .previous_signature = verified->seed_signature,
+        .chunked = signs_chunks(verified) || verified->payload == SIGV4_PAYLOAD_STREAMING_UNSIGNED_TRAILER,
+    };
+    sha256_init(&body->body_hash);
+}
+
+[[nodiscard]] static Error fail(SigV4Body *body, SigV4BodyProblem problem, Err *err)
+{
+    static const char *const WHY[] = {
+        [SIGV4_BODY_HASH_MISMATCH] = "the body does not have the hash it was signed with",
+        [SIGV4_BODY_SIGNATURE_MISMATCH] = "a chunk signature does not match",
+        [SIGV4_BODY_MALFORMED] = "the aws-chunked body is malformed",
+    };
+    body->problem = problem;
+    return err_set(err, ERR_PARSE, "sigv4: %s", WHY[problem]);
+}
+
+// read_more reads from the client into the framing buffer.
+[[nodiscard]] static Error read_more(SigV4Body *body, Err *err)
+{
+    if (body->start > 0) {
+        memmove(body->buffer, body->buffer + body->start, body->end - body->start);
+        body->end -= body->start;
+        body->start = 0;
+    }
+    if (body->end == sizeof body->buffer) {
+        return fail(body, SIGV4_BODY_MALFORMED, err);
+    }
+    size_t got = 0;
+    Error e = body->read(body->context, body->buffer + body->end, sizeof body->buffer - body->end, &got, err);
+    if (e == ERR_OK && got == 0) {
+        return fail(body, SIGV4_BODY_MALFORMED, err);
+    }
+    body->end += got;
+    return e;
+}
+
+[[nodiscard]] static Error read_line(SigV4Body *body, String *line, Err *err)
+{
+    for (;;) {
+        String pending = { body->buffer + body->start, body->end - body->start };
+        size_t index = 0;
+        if (str_find(pending, S("\r\n"), &index)) {
+            *line = str_copy(body->arena, str_slice(pending, 0, index));
+            body->start += index + 2;
+            return ERR_OK;
+        }
+        Error e = read_more(body, err);
+        if (e != ERR_OK) {
+            return e;
+        }
+    }
+}
+
+[[nodiscard]] static Error check_chunk_signature(SigV4Body *body, Err *err)
+{
+    if (!signs_chunks(body->verified)) {
+        return ERR_OK;
+    }
+    uint8_t digest[SHA256_LEN];
+    sha256_final(&body->chunk_hash, digest);
+    String expected = sigv4_chunk_signature(body->arena, body->verified, body->previous_signature,
+                                            hex_encode(body->arena, digest, SHA256_LEN));
+    if (!equal_constant_time(expected, body->chunk_signature)) {
+        return fail(body, SIGV4_BODY_SIGNATURE_MISMATCH, err);
+    }
+    body->previous_signature = expected;
+    return ERR_OK;
+}
+
+// check_trailer_signature checks x-amz-trailer-signature, which signs the
+// other trailers as name:value lines following the last chunk's signature.
+[[nodiscard]] static Error check_trailer_signature(SigV4Body *body, String signature, Err *err)
+{
+    StringBuilder lines = str_builder_create(body->arena, 128);
+    for (size_t i = 0; i < body->trailer_count; i++) {
+        str_builder_append_format(&lines, "%.*s:%.*s\n", (int)body->trailers[i].name.len, body->trailers[i].name.data,
+                                  (int)body->trailers[i].value.len, body->trailers[i].value.data);
+    }
+    String trailers_hash = hex_sha256(body->arena, str_builder_finish(&lines));
+    const SigV4Verified *verified = body->verified;
+    String to_sign = str_format(body->arena, "AWS4-HMAC-SHA256-TRAILER\n%.*s\n%.*s\n%.*s\n%.*s",
+                                (int)verified->amz_date.len, verified->amz_date.data, (int)verified->scope.len,
+                                verified->scope.data, (int)body->previous_signature.len,
+                                body->previous_signature.data, (int)trailers_hash.len, trailers_hash.data);
+    if (!equal_constant_time(hex_hmac(body->arena, verified->signing_key, to_sign), signature)) {
+        return fail(body, SIGV4_BODY_SIGNATURE_MISMATCH, err);
+    }
+    return ERR_OK;
+}
+
+[[nodiscard]] static Error read_trailers(SigV4Body *body, Err *err)
+{
+    String signature = S("");
+    bool signed_trailer = false;
+    String line;
+    Error e;
+    while ((e = read_line(body, &line, err)) == ERR_OK && line.len > 0) {
+        String name;
+        String value;
+        if (!str_cut(line, ':', &name, &value)) {
+            return fail(body, SIGV4_BODY_MALFORMED, err);
+        }
+        name = str_trim(name);
+        value = str_trim(value);
+        if (str_equal_ignore_case(name, S("x-amz-trailer-signature"))) {
+            signature = value;
+            signed_trailer = true;
+        } else if (body->trailer_count < SIGV4_BODY_MAX_TRAILERS) {
+            body->trailers[body->trailer_count++] = (HttpHeader){ name, value };
+        } else {
+            return fail(body, SIGV4_BODY_MALFORMED, err);
+        }
+    }
+    if (e != ERR_OK || body->verified->payload != SIGV4_PAYLOAD_STREAMING_SIGNED_TRAILER) {
+        return e;
+    }
+    return signed_trailer ? check_trailer_signature(body, signature, err) : fail(body, SIGV4_BODY_SIGNATURE_MISMATCH, err);
+}
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+[[nodiscard]] static Error start_chunk(SigV4Body *body, Err *err)
+{
+    String line;
+    Error e = read_line(body, &line, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    String size_text;
+    String extension;
+    str_cut(line, ';', &size_text, &extension);
+    uint64_t size = 0;
+    for (size_t i = 0; i < size_text.len; i++) {
+        int digit = hex_digit(size_text.data[i]);
+        if (digit < 0 || size > (UINT64_MAX >> 4)) {
+            return fail(body, SIGV4_BODY_MALFORMED, err);
+        }
+        size = size << 4 | (uint64_t)digit;
+    }
+    if (size_text.len == 0) {
+        return fail(body, SIGV4_BODY_MALFORMED, err);
+    }
+    body->chunk_signature = str_trim_prefix(extension, S("chunk-signature="));
+    body->chunk_remaining = size;
+    sha256_init(&body->chunk_hash);
+    if (size > 0) {
+        return ERR_OK;
+    }
+    e = check_chunk_signature(body, err);
+    if (e == ERR_OK) {
+        e = read_trailers(body, err);
+    }
+    body->done = e == ERR_OK;
+    return e;
+}
+
+[[nodiscard]] static Error end_chunk(SigV4Body *body, Err *err)
+{
+    String crlf;
+    Error e = read_line(body, &crlf, err);
+    if (e == ERR_OK && crlf.len != 0) {
+        return fail(body, SIGV4_BODY_MALFORMED, err);
+    }
+    return e != ERR_OK ? e : check_chunk_signature(body, err);
+}
+
+[[nodiscard]] static Error read_chunked(SigV4Body *body, char *buffer, size_t capacity, size_t *got, Err *err)
+{
+    if (body->chunk_remaining == 0) {
+        Error e = start_chunk(body, err);
+        if (e != ERR_OK || body->done) {
+            return e;
+        }
+    }
+    size_t want = body->chunk_remaining < capacity ? (size_t)body->chunk_remaining : capacity;
+    if (body->start == body->end) {
+        Error e = body->read(body->context, buffer, want, got, err);
+        if (e == ERR_OK && *got == 0) {
+            e = fail(body, SIGV4_BODY_MALFORMED, err);
+        }
+        if (e != ERR_OK) {
+            return e;
+        }
+    } else {
+        *got = min_size(want, body->end - body->start);
+        memcpy(buffer, body->buffer + body->start, *got);
+        body->start += *got;
+    }
+    body->chunk_remaining -= *got;
+    sha256_update(&body->chunk_hash, buffer, *got);
+    return body->chunk_remaining == 0 ? end_chunk(body, err) : ERR_OK;
+}
+
+Error sigv4_body_read(SigV4Body *body, char *buffer, size_t capacity, size_t *got, Err *err)
+{
+    *got = 0;
+    if (body->done || capacity == 0) {
+        return ERR_OK;
+    }
+    if (body->chunked) {
+        return read_chunked(body, buffer, capacity, got, err);
+    }
+    Error e = body->read(body->context, buffer, capacity, got, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    sha256_update(&body->body_hash, buffer, *got);
+    if (*got > 0) {
+        return ERR_OK;
+    }
+    body->done = true;
+    if (body->verified->payload != SIGV4_PAYLOAD_SHA256) {
+        return ERR_OK;
+    }
+    uint8_t digest[SHA256_LEN];
+    sha256_final(&body->body_hash, digest);
+    if (!str_equal(hex_encode(body->arena, digest, SHA256_LEN), body->verified->payload_hash)) {
+        return fail(body, SIGV4_BODY_HASH_MISMATCH, err);
+    }
+    return ERR_OK;
+}
+
+bool sigv4_body_trailer(const SigV4Body *body, String name, String *value)
+{
+    for (size_t i = 0; i < body->trailer_count; i++) {
+        if (str_equal_ignore_case(body->trailers[i].name, name)) {
+            *value = body->trailers[i].value;
+            return true;
+        }
+    }
+    return false;
 }

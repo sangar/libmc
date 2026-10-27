@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mc/crypto/sha256.h"
 #include "mc/net/http.h"
 
 // Checking requests signed with AWS Signature Version 4, as an S3-compatible
@@ -70,3 +71,51 @@ SigV4Problem sigv4_verify(Arena *arena, const SigV4Received *request, const SigV
 // SHA-256 is chunk_sha256 in lowercase hex, following previous_signature.
 String sigv4_chunk_signature(Arena *arena, const SigV4Verified *verified, String previous_signature,
                              String chunk_sha256);
+
+// SigV4BodyRead reads up to capacity bytes of the body as sent into buffer;
+// *got is 0 at its end. http_exchange_read has this shape.
+typedef Error (*SigV4BodyRead)(void *context, char *buffer, size_t capacity, size_t *got, Err *err);
+
+typedef enum SigV4BodyProblem {
+    SIGV4_BODY_OK,
+    SIGV4_BODY_HASH_MISMATCH,      // the body is not what x-amz-content-sha256 promised
+    SIGV4_BODY_SIGNATURE_MISMATCH, // a chunk's or the trailer's signature is wrong
+    SIGV4_BODY_MALFORMED,          // aws-chunked framing that cannot be read, or a body cut short
+} SigV4BodyProblem;
+
+enum { SIGV4_BODY_MAX_TRAILERS = 8 };
+
+// SigV4Body reads a verified request's body as the client meant it: the
+// aws-chunked framing taken off and each chunk's signature checked, or the
+// whole body's hash checked at its end. It holds 4 KiB of framing.
+typedef struct SigV4Body {
+    Arena *arena;
+    const SigV4Verified *verified;
+    SigV4BodyRead read;
+    void *context;
+    Sha256 body_hash;
+    Sha256 chunk_hash;
+    String previous_signature;
+    String chunk_signature;
+    uint64_t chunk_remaining;
+    bool chunked;
+    bool done;
+    char buffer[4096];
+    size_t start;
+    size_t end;
+    HttpHeader trailers[SIGV4_BODY_MAX_TRAILERS];
+    size_t trailer_count;
+    SigV4BodyProblem problem;
+} SigV4Body;
+
+// sigv4_body_init reads the body through read(context, ...); verified, from
+// sigv4_verify, must outlive body.
+void sigv4_body_init(SigV4Body *body, Arena *arena, const SigV4Verified *verified, SigV4BodyRead read, void *context);
+// sigv4_body_read stores up to capacity bytes of the decoded body in buffer;
+// *got is 0 at its end, which comes only once every check has passed. A body
+// that fails one is ERR_PARSE, with body->problem saying which; an error of
+// read is passed on.
+[[nodiscard]] Error sigv4_body_read(SigV4Body *body, char *buffer, size_t capacity, size_t *got, Err *err);
+// sigv4_body_trailer finds a trailer the client sent after an aws-chunked
+// body, such as x-amz-checksum-crc32, once the body has ended.
+bool sigv4_body_trailer(const SigV4Body *body, String name, String *value);
