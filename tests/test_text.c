@@ -236,11 +236,14 @@ static void sha256_known_vectors(Test *test)
     sha256(S("abc"), digest);
     test_check_str(test, hex_encode(test->arena, digest, SHA256_LEN),
                    S("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "abc");
+    // memset, as str_repeat takes seconds for a million bytes under the sanitizers on slow runners.
+    size_t million = 1000000;
+    char *a = arena_push(test->arena, million);
+    memset(a, 'a', million);
     Sha256 hash;
     sha256_init(&hash);
-    String million = str_repeat(test->arena, S("a"), 1000000);
-    for (size_t at = 0; at < million.len; at += 997) {
-        sha256_update(&hash, million.data + at, min_size(997, million.len - at));
+    for (size_t at = 0; at < million; at += 997) {
+        sha256_update(&hash, a + at, min_size(997, million - at));
     }
     sha256_final(&hash, digest);
     test_check_str(test, hex_encode(test->arena, digest, SHA256_LEN),
