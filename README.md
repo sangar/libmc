@@ -139,6 +139,8 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/container/hash.h` | FNV-1a hashing |
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
+| | `mc/crypto/md5.h` | MD5, for checksums that protocols still name, such as S3's ETag |
+| | `mc/crypto/crc32.h` | CRC-32 (IEEE, as zlib's) and CRC-32C (Castagnoli) |
 | | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing, and the signing key it derives |
 | platform | `mc/platform/platform.h` | Clock, secure random bytes, locale-independent floats, threads, files and mappings, writes made durable with `F_FULLFSYNC` on macOS, reading a descriptor to its end, directories with metadata, advisory file locks, a search for a file up through parent directories, a private per-user runtime directory, processes (also detached into a session of their own), environment, signals and a thread that watches for them, TCP and Unix sockets, non-blocking accepts, sends and receives, and socket pairs for driving a server in-process |
 | | `mc/platform/frame.h` | Length-prefixed frames of a header and a body on a stream socket |
