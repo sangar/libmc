@@ -3,17 +3,6 @@
 #include "mc/encoding/gzip.h"
 #include "mc/platform/platform.h"
 
-static bool header(const HttpHeader *headers, size_t count, String name, String *value)
-{
-    for (size_t i = 0; i < count; i++) {
-        if (str_equal_ignore_case(headers[i].name, name)) {
-            *value = headers[i].value;
-            return true;
-        }
-    }
-    return false;
-}
-
 // weight_zero says whether a coding's ;q= parameter refuses it.
 static bool weight_zero(String parameters)
 {
@@ -87,9 +76,9 @@ bool http_compressible(String content_type)
 static bool carries_credentials(const HttpServerRequest *request)
 {
     String value = { 0 };
-    return header(request->headers, request->header_count, S("Cookie"), &value) ||
-           header(request->headers, request->header_count, S("Authorization"), &value) ||
-           header(request->headers, request->header_count, S("X-Csrf-Token"), &value);
+    return http_header_find(request->headers, request->header_count, S("Cookie"), &value) ||
+           http_header_find(request->headers, request->header_count, S("Authorization"), &value) ||
+           http_header_find(request->headers, request->header_count, S("X-Csrf-Token"), &value);
 }
 
 // jitter is 1 to max_bytes random letters, or nothing when max_bytes is 0.
@@ -112,7 +101,7 @@ static String jitter(Arena *arena, size_t max_bytes)
 static void add_headers(Arena *arena, HttpServerResponse *response)
 {
     String vary = { 0 };
-    bool has_vary = header(response->headers, response->header_count, S("Vary"), &vary);
+    bool has_vary = http_header_find(response->headers, response->header_count, S("Vary"), &vary);
     HttpHeader *headers = arena_push(arena, (response->header_count + 2) * sizeof *headers);
     size_t count = 0;
     for (size_t i = 0; i < response->header_count; i++) {
@@ -137,8 +126,8 @@ void http_compress(Arena *arena, const HttpServerRequest *request, HttpServerRes
     String encoding = { 0 };
     bool eligible = response->status >= 200 && response->status != 204 && response->status != 304 &&
                     response->body.len >= compression->min_bytes &&
-                    !header(response->headers, response->header_count, S("Content-Encoding"), &encoding) &&
-                    header(response->headers, response->header_count, S("Content-Type"), &content_type) &&
+                    !http_header_find(response->headers, response->header_count, S("Content-Encoding"), &encoding) &&
+                    http_header_find(response->headers, response->header_count, S("Content-Type"), &content_type) &&
                     http_compressible(content_type) && http_accepts_gzip(arena, request) &&
                     !(compression->skip_credentials && carries_credentials(request));
     if (!eligible) {

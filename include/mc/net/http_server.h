@@ -32,6 +32,25 @@ typedef struct HttpServerRequest {
     unsigned version_minor; // HTTP/1.0 or HTTP/1.1; 0 for HTTP/2
 } HttpServerRequest;
 
+// http_query_param finds the first parameter called name in query, a request's
+// query without its '?', and decodes its value as a form does: '+' is a
+// space and %XX a byte, while a '%' that begins no escape stays as it is.
+// "?uploads" has the parameter uploads with an empty value.
+bool http_query_param(Arena *arena, String query, String name, String *value);
+
+typedef enum HttpRangeResult {
+    HTTP_RANGE_NONE,          // no range to honour: answer the whole body with 200
+    HTTP_RANGE_SATISFIABLE,   // answer [first, last] with 206 and Content-Range
+    HTTP_RANGE_UNSATISFIABLE, // answer 416
+} HttpRangeResult;
+
+// http_parse_range reads a Range field of a single bytes range, such as
+// bytes=0-499, bytes=500- or bytes=-500, against a body of size bytes into
+// the inclusive [*first, *last], cut to the body. Several ranges, another
+// unit or a malformed field are HTTP_RANGE_NONE, which RFC 9110 14.2 lets a
+// server answer with the whole body.
+HttpRangeResult http_parse_range(String field, int64_t size, int64_t *first, int64_t *last);
+
 // HttpServerResponse comes to the handler as 200 with no headers or body. The
 // server adds Date, Content-Length and Connection, and leaves the body out
 // for HEAD, 204 and 304; a handler setting any of those three fields is a
