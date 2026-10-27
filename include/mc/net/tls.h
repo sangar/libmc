@@ -15,7 +15,7 @@ typedef struct TlsServerConfig {
     String certificate_pem; // the certificate, then any intermediates
     String key_pem;         // its key
     // protocols are offered by ALPN, the server's preference first; none
-    // offers http/1.1, as an HttpServer speaks.
+    // offers h2 and http/1.1, as an HttpServer speaks.
     const String *protocols;
     size_t protocol_count;
 } TlsServerConfig;

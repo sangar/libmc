@@ -39,7 +39,7 @@ struct TlsSession {
     Credentials *credentials; // what this session's handshake presents, once it starts
 };
 
-static const String HTTP_1_1[] = { { "http/1.1", 8 } };
+static const String HTTP_PROTOCOLS[] = { { "h2", 2 }, { "http/1.1", 8 } };
 
 [[nodiscard]] static Error tls_fail(Err *err, const char *what, int status)
 {
@@ -124,11 +124,11 @@ static void server_free(TlsServer *server)
     arena_destroy(server->arena);
 }
 
-// protocol_list copies protocols as mbedTLS takes them, HTTP/1.1 when there are none.
+// protocol_list copies protocols as mbedTLS takes them, HTTP/2 and HTTP/1.1 when there are none.
 static const char **protocol_list(Arena *arena, const TlsServerConfig *config)
 {
-    const String *protocols = config->protocol_count > 0 ? config->protocols : HTTP_1_1;
-    size_t count = config->protocol_count > 0 ? config->protocol_count : countof(HTTP_1_1);
+    const String *protocols = config->protocol_count > 0 ? config->protocols : HTTP_PROTOCOLS;
+    size_t count = config->protocol_count > 0 ? config->protocol_count : countof(HTTP_PROTOCOLS);
     const char **list = arena_push(arena, (count + 1) * sizeof *list);
     for (size_t i = 0; i < count; i++) {
         list[i] = str_cstr(arena, protocols[i]);
@@ -395,6 +395,12 @@ TlsResult tls_try_receive(TlsSession *session, char *buffer, size_t capacity, si
     int status = mbedtls_ssl_read(&session->ssl, (unsigned char *)buffer, capacity);
     *got = status > 0 ? (size_t)status : 0;
     return result_of(status);
+}
+
+String tls_session_protocol(const TlsSession *session)
+{
+    const char *protocol = mbedtls_ssl_get_alpn_protocol(&session->ssl);
+    return protocol != nullptr ? S(protocol) : S("");
 }
 
 TlsResult tls_try_send(TlsSession *session, String data, size_t *sent)
