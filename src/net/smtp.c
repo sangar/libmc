@@ -6,6 +6,7 @@
 #include "mc/platform/platform.h"
 #include "mc/text/fmt.h"
 #include "mc/text/utf8.h"
+#include "curl_global.h"
 #include "roots.h"
 
 enum {
@@ -382,8 +383,9 @@ Error smtp_send(const SmtpConfig *config, const MailMessage *message, Err *err)
     if (ca_file.len > 0 && !file_exists(ca_file)) {
         return err_set(err, ERR_NOT_FOUND, "smtp: no bundle of trusted roots at %.*s", (int)ca_file.len, ca_file.data);
     }
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-        return err_set(err, ERR_PLATFORM, "smtp: curl_global_init failed");
+    Error started = curl_global_start("smtp", err);
+    if (started != ERR_OK) {
+        return started;
     }
     Mail mail = { .arena = arena_create(0), .curl = curl_easy_init() };
     if (mail.curl != nullptr) {
@@ -403,7 +405,6 @@ Error smtp_send(const SmtpConfig *config, const MailMessage *message, Err *err)
     curl_slist_free_all(mail.recipients);
     curl_slist_free_all(mail.headers);
     curl_easy_cleanup(mail.curl);
-    curl_global_cleanup();
     arena_destroy(mail.arena);
     return e;
 }
