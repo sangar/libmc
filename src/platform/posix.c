@@ -620,6 +620,22 @@ Error file_truncate(int fd, int64_t size, Err *err)
     return ftruncate(fd, (off_t)size) != 0 ? posix_fail_errno(err, "truncate") : ERR_OK;
 }
 
+Error file_sync(int fd, Err *err)
+{
+#ifdef __APPLE__
+    // F_FULLFSYNC fails on file systems that lack it, where fsync is all there is.
+    if (fcntl(fd, F_FULLFSYNC) == 0) {
+        return ERR_OK;
+    }
+#endif
+    while (fsync(fd) != 0) {
+        if (errno != EINTR) {
+            return posix_fail_errno(err, "sync");
+        }
+    }
+    return ERR_OK;
+}
+
 Error file_rename(String from, String to, Err *err)
 {
     CPath cfrom;
@@ -820,6 +836,22 @@ Error dir_create(String path, unsigned mode, Err *err)
         return e;
     }
     return make_directory(cpath.text, mode) ? ERR_OK : posix_fail_errno(err, "create directory %s", cpath.text);
+}
+
+Error dir_sync(String path, Err *err)
+{
+    CPath cpath;
+    Error e = to_cpath(path, &cpath, err);
+    if (e != ERR_OK) {
+        return e;
+    }
+    int fd = open(cpath.text, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return posix_fail_errno(err, "open %s", cpath.text);
+    }
+    e = file_sync(fd, err);
+    close(fd);
+    return e;
 }
 
 Error dir_create_all(String path, unsigned mode, Err *err)
