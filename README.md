@@ -155,6 +155,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | encoding | `mc/encoding/node.h` | Document tree of scalars, sequences and mappings shared by the parsers |
 | | `mc/encoding/json.h` | Strict JSON parsing with line and column errors, encoding and quoting, on yyjson |
 | | `mc/encoding/yaml.h` | YAML 1.2 parsing with core schema typing and shared aliases, on cyaml |
+| | `mc/encoding/base64.h` | RFC 4648 Base64, standard with padding or URL-safe without, decoding only the canonical encoding |
 | | `mc/encoding/dotenv.h` | `.env` files into `NAME=value` entries, with quotes and comments and no expansion |
 | | `mc/encoding/markdown.h` | CommonMark with GitHub's tables, task lists, strikethrough and autolinks to HTML, on md4c; raw HTML and script links shown as text unless allowed |
 | | `mc/encoding/xml.h` | XML 1.0 as start tags, end tags and text, on Expat, with entity expansion bounded and external entities never loaded |
