@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "mc/platform/platform.h"
+#include "curl_global.h"
 #include "roots.h"
 
 enum {
@@ -42,12 +43,12 @@ Error http_client_create(const HttpClientConfig *config, HttpClient **client, Er
         return err_set(err, ERR_NOT_FOUND, "http: no bundle of trusted roots at %.*s",
                        (int)ca_file.len, ca_file.data);
     }
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-        return err_set(err, ERR_PLATFORM, "http: curl_global_init failed");
+    Error started = curl_global_start("http", err);
+    if (started != ERR_OK) {
+        return started;
     }
     CURL *curl = curl_easy_init();
     if (curl == nullptr) {
-        curl_global_cleanup();
         return err_set(err, ERR_OUT_OF_MEMORY, "http: curl_easy_init failed");
     }
     Arena *arena = arena_create(0);
@@ -71,7 +72,6 @@ Error http_client_create(const HttpClientConfig *config, HttpClient **client, Er
 void http_client_destroy(HttpClient *client)
 {
     curl_easy_cleanup(client->curl);
-    curl_global_cleanup();
     arena_destroy(client->arena);
 }
 
