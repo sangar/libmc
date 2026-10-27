@@ -149,6 +149,8 @@ void http_server_destroy(HttpServer *server);
 
 // http_server_exchange runs config's handler, not a stream_handler, on this thread, with no socket,
 // for one connection on which a client sends each piece in turn and then
-// closes. *answer is every byte the server answered, in arena.
+// closes. Pieces that begin with HTTP/2's connection preface are spoken to
+// as HTTP/2 is with prior knowledge, which a server on a socket does only
+// after ALPN chose it. *answer is every byte the server answered, in arena.
 [[nodiscard]] Error http_server_exchange(Arena *arena, const HttpServerConfig *config, StringList pieces,
                                          String *answer, Err *err);

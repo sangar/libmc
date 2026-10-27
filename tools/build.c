@@ -4,8 +4,10 @@
 //
 //     ./nob                 debug library with sanitizers  -> out/debug/libmc.a
 //     ./nob release         optimised library              -> out/release/libmc.a
+//     ./nob fuzz            library instrumented for libFuzzer, $CC a clang that has it -> out/fuzz/libmc.a
+//     ./nob tsan            build and run the tests under ThreadSanitizer -> out/tsan/
 //     ./nob test            build and run the tests (debug)
-//     ./nob check           modern-c contract check, then the tests
+//     ./nob check           modern-c contract check, then the tests, then again under ThreadSanitizer
 //     ./nob cross           compile and archive for every target with zig cc
 //     ./nob clean           remove out/
 //     ./nob hash <dir>      print the deps.lock hash of a directory
@@ -60,8 +62,14 @@ static const char *const WARNING_FLAGS[] = {
     "-std=c23", "-Wall", "-Wextra", "-Werror", "-Wconversion", "-Wshadow", "-Wvla",
     "-Wstrict-prototypes", "-Wimplicit-fallthrough", "-Wno-unused-parameter",
 };
+// Flavor is how the library is compiled, each into out/<name>/.
+typedef enum { FLAVOR_DEBUG, FLAVOR_RELEASE, FLAVOR_FUZZ, FLAVOR_TSAN } Flavor;
+static const char *const FLAVOR_NAMES[] = { "debug", "release", "fuzz", "tsan" };
 static const char *const DEBUG_FLAGS[] = { "-g", "-O0", "-fsanitize=address,undefined", "-fno-omit-frame-pointer" };
 static const char *const RELEASE_FLAGS[] = { "-O2" };
+static const char *const FUZZ_FLAGS[] = { "-g", "-O1", "-fsanitize=fuzzer-no-link,address,undefined",
+                                          "-fno-omit-frame-pointer" };
+static const char *const TSAN_FLAGS[] = { "-g", "-O1", "-fsanitize=thread", "-fno-omit-frame-pointer" };
 static const char *const AREAS[] = { "core", "text", "container", "crypto", "platform", "concurrency", "encoding", "log", "net", "term" };
 
 
@@ -279,7 +287,7 @@ static time_t newest_header_mtime(void)
 }
 
 typedef struct {
-    bool release;
+    Flavor flavor;
     // dependency is the vendored library being compiled, NULL for libmc's own sources.
     const Dependency *dependency;
     const Target *target;
@@ -312,7 +320,7 @@ static void push_compiler(Command *command, const Build *build)
 // Sanitizers need the host's runtime, so cross builds only compile.
 static bool sanitized(const Build *build)
 {
-    return !build->release && build->target == NULL;
+    return build->flavor != FLAVOR_RELEASE && build->target == NULL;
 }
 
 static void object_path(char *out, const char *obj_dir, const char *source)
@@ -364,12 +372,16 @@ static void push_compile_command(Command *command, const Build *build)
         command_push_many(command, WARNING_FLAGS, sizeof WARNING_FLAGS / sizeof *WARNING_FLAGS);
         command_push_many(command, LIBMC_FLAGS, sizeof LIBMC_FLAGS / sizeof *LIBMC_FLAGS);
     }
-    if (build->release) {
+    if (build->flavor == FLAVOR_RELEASE) {
         command_push_many(command, RELEASE_FLAGS, sizeof RELEASE_FLAGS / sizeof *RELEASE_FLAGS);
-    } else if (sanitized(build)) {
-        command_push_many(command, DEBUG_FLAGS, sizeof DEBUG_FLAGS / sizeof *DEBUG_FLAGS);
-    } else {
+    } else if (!sanitized(build)) {
         command_push(command, "-g");
+    } else if (build->flavor == FLAVOR_FUZZ) {
+        command_push_many(command, FUZZ_FLAGS, sizeof FUZZ_FLAGS / sizeof *FUZZ_FLAGS);
+    } else if (build->flavor == FLAVOR_TSAN) {
+        command_push_many(command, TSAN_FLAGS, sizeof TSAN_FLAGS / sizeof *TSAN_FLAGS);
+    } else {
+        command_push_many(command, DEBUG_FLAGS, sizeof DEBUG_FLAGS / sizeof *DEBUG_FLAGS);
     }
 }
 
@@ -982,7 +994,7 @@ static int build_and_run_tests(const Build *build)
         Command command = { 0 };
         push_compiler(&command, build);
         if (sanitized(build)) {
-            command_push(&command, "-fsanitize=address,undefined");
+            command_push(&command, build->flavor == FLAVOR_TSAN ? "-fsanitize=thread" : "-fsanitize=address,undefined");
         }
         for (size_t i = 0; i < test_objects.count; i++) {
             command_push(&command, test_objects.items[i]);
@@ -1008,15 +1020,15 @@ static int build_and_run_tests(const Build *build)
     return command_run(&run);
 }
 
-static void configure(Build *build, bool release, const Target *target)
+static void configure(Build *build, Flavor flavor, const Target *target)
 {
-    build->release = release;
+    build->flavor = flavor;
     build->dependency = NULL;
     build->target = target;
     snprintf(build->curl_config_flag, sizeof build->curl_config_flag, "-Isrc/net/curl/%s", build_os(build));
     build->headers_mtime = newest_header_mtime();
     snprintf(build->out_dir, sizeof build->out_dir, "out/%s%s%s", target != NULL ? target->name : "",
-             target != NULL ? "/" : "", release ? "release" : "debug");
+             target != NULL ? "/" : "", FLAVOR_NAMES[flavor]);
     snprintf(build->obj_dir, sizeof build->obj_dir, "%s/obj", build->out_dir);
 }
 
@@ -1024,7 +1036,7 @@ static int run_cross(void)
 {
     for (size_t i = 0; i < sizeof TARGETS / sizeof *TARGETS; i++) {
         Build build;
-        configure(&build, true, &TARGETS[i]);
+        configure(&build, FLAVOR_RELEASE, &TARGETS[i]);
         FileList objects = { 0 };
         char library[PATH_MAX_LEN];
         build_library(&build, &objects, library);
@@ -1088,9 +1100,16 @@ int main(int argc, char **argv)
         return run_cross();
     }
 
+    Flavor flavor = FLAVOR_DEBUG;
+    for (size_t i = 0; i < sizeof FLAVOR_NAMES / sizeof *FLAVOR_NAMES; i++) {
+        flavor = strcmp(mode, FLAVOR_NAMES[i]) == 0 ? (Flavor)i : flavor;
+    }
     Build build;
-    configure(&build, strcmp(mode, "release") == 0, NULL);
-    if (strcmp(mode, "build") == 0 || strcmp(mode, "release") == 0) {
+    configure(&build, flavor, NULL);
+    if (strcmp(mode, "tsan") == 0) {
+        return build_and_run_tests(&build);
+    }
+    if (strcmp(mode, "build") == 0 || strcmp(mode, "release") == 0 || strcmp(mode, "fuzz") == 0) {
         FileList objects = { 0 };
         char library[PATH_MAX_LEN];
         build_library(&build, &objects, library);
@@ -1102,9 +1121,12 @@ int main(int argc, char **argv)
     }
     if (strcmp(mode, "check") == 0) {
         int status = run_check();
-        return status != 0 ? status : build_and_run_tests(&build);
+        status = status != 0 ? status : build_and_run_tests(&build);
+        Build threads;
+        configure(&threads, FLAVOR_TSAN, NULL);
+        return status != 0 ? status : build_and_run_tests(&threads);
     }
 
-    fprintf(stderr, "build: unknown mode '%s'\nmodes: build, release, test, check, cross, clean, hash <dir>\n", mode);
+    fprintf(stderr, "build: unknown mode '%s'\nmodes: build, release, fuzz, tsan, test, check, cross, clean, hash <dir>\n", mode);
     return 2;
 }
