@@ -20,9 +20,12 @@ typedef struct Http2Request {
 } Http2Request;
 
 // http2_create takes limits with every default already applied, and queues
-// the server's settings to send. The caller owns it, and destroys it only
-// once every request it gave out has been answered.
-Http2 *http2_create(HttpServerLimits limits);
+// the server's settings to send. When streaming, a request comes at the end
+// of its head, its body is read with http2_body, with no limit on its size,
+// and it is answered with http2_start, http2_write and http2_end. The caller
+// owns it, and destroys it only once every request it gave out has been
+// answered.
+Http2 *http2_create(HttpServerLimits limits, bool streaming);
 void http2_destroy(Http2 *http);
 
 // http2_feed parses all of data, empty when the client closed, and reports
@@ -35,6 +38,27 @@ bool http2_next_request(Http2 *http, Http2Request *request);
 // http2_respond answers stream with response, or an empty 500 when it is
 // nullptr. A stream the client has reset meanwhile is only released.
 void http2_respond(Http2 *http, Http2Stream *stream, const HttpServerResponse *response);
+
+// http2_body is the part of a streamed body received and not yet taken.
+String http2_body(const Http2Stream *stream);
+// http2_body_take takes count bytes of it, which lets the client send as many more.
+void http2_body_take(Http2 *http, Http2Stream *stream, size_t count);
+// http2_body_ended says whether the body was taken to its end.
+bool http2_body_ended(const Http2Stream *stream);
+// http2_stream_closed says whether the stream ended early, as when the client reset it.
+bool http2_stream_closed(const Http2Stream *stream);
+
+// http2_start begins a streamed response, with fields http1_fields_valid
+// takes, of content_length bytes, or unknown when it is negative.
+void http2_start(Http2 *http, Http2Stream *stream, unsigned status, const HttpHeader *headers, size_t header_count,
+                 int64_t content_length);
+// http2_writable says whether the response's last piece went out, so the next may come.
+bool http2_writable(const Http2Stream *stream);
+// http2_write adds data to the response's body.
+void http2_write(Http2 *http, Http2Stream *stream, String data);
+// http2_end ends the response, or resets the stream unless complete, and
+// releases the stream as http2_respond does.
+void http2_end(Http2 *http, Http2Stream *stream, bool complete);
 
 // http2_take_output is what to send since the last take; it stays valid until the next.
 String http2_take_output(Http2 *http);

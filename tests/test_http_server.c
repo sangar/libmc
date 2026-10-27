@@ -1,5 +1,6 @@
 #include "test.h"
 
+#include "mc/crypto/sha256.h"
 #include "mc/encoding/gzip.h"
 #include "mc/net/http.h"
 #include "mc/net/http_server.h"
@@ -13,7 +14,17 @@
 // http_server_exchange, and on 127.0.0.1 against raw sockets and libmc's own
 // HTTP client.
 
-enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BYTES = 64 << 10, UPLOAD_BYTES = 64 << 10 };
+enum {
+    SLOW_MS = 600,
+    RECEIVE_TIMEOUT_MS = 3000,
+    BIG_BYTES = 8 << 20,
+    TLS_BIG_BYTES = 64 << 10,
+    UPLOAD_BYTES = 64 << 10,
+    // Streamed bodies pass through 64 KiB pipes and HTTP/2's 64 KiB windows.
+    TLS_STREAM_BYTES = 200 << 10,
+    READ_PIECE_BYTES = 4096,
+    WRITE_PIECE_BYTES = 10000,
+};
 
 // answer echoes the method, path and body; /slow sleeps first, /fail fails,
 // /bad-header sets a field value holding a line break, /version answers
@@ -51,6 +62,54 @@ enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BY
     response->body = str_format(arena, "%.*s %.*s %.*s", (int)request->method.len, request->method.data,
                                 (int)request->path.len, request->path.data, (int)request->body.len, request->body.data);
     return ERR_OK;
+}
+
+// hash_body answers the SHA-256 of the body, read a piece at a time.
+[[nodiscard]] static Error hash_body(HttpExchange *exchange, Err *err)
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    char buffer[READ_PIECE_BYTES];
+    size_t got = 0;
+    Error e = ERR_OK;
+    do {
+        e = http_exchange_read(exchange, buffer, sizeof buffer, &got, err);
+        sha256_update(&hash, buffer, got);
+    } while (e == ERR_OK && got > 0);
+    uint8_t digest[SHA256_LEN];
+    sha256_final(&hash, digest);
+    String hex = hex_encode(http_exchange_arena(exchange), digest, SHA256_LEN);
+    if (e == ERR_OK) {
+        e = http_exchange_start(exchange, 200, nullptr, 0, (int64_t)hex.len, err);
+    }
+    return e == ERR_OK ? http_exchange_write(exchange, hex, err) : e;
+}
+
+// stream_answer streams: POST /hash answers the body's SHA-256, /download?n
+// sends n bytes in pieces with their length announced and /chunked?n without,
+// and /refuse answers 417 with the body unread.
+[[nodiscard]] static Error stream_answer(void *context, HttpExchange *exchange, Err *err)
+{
+    const HttpServerRequest *request = http_exchange_request(exchange);
+    if (str_equal(request->path, S("/refuse"))) {
+        return http_exchange_start(exchange, 417, nullptr, 0, 0, err);
+    }
+    if (str_equal(request->path, S("/hash"))) {
+        return hash_body(exchange, err);
+    }
+    uint64_t total = 0;
+    if (!str_parse_u64(request->query, &total)) {
+        return http_exchange_start(exchange, 404, nullptr, 0, 0, err);
+    }
+    char piece[WRITE_PIECE_BYTES];
+    memset(piece, 'd', sizeof piece);
+    bool announced = str_equal(request->path, S("/download"));
+    Error e = http_exchange_start(exchange, 200, nullptr, 0, announced ? (int64_t)total : -1, err);
+    for (uint64_t sent = 0; e == ERR_OK && sent < total; sent += sizeof piece) {
+        size_t count = total - sent < sizeof piece ? (size_t)(total - sent) : sizeof piece;
+        e = http_exchange_write(exchange, (String){ piece, count }, err);
+    }
+    return e;
 }
 
 static String exchange_with(Test *test, const HttpCompression *compression, String request)
@@ -182,18 +241,24 @@ static void http_server_continues_and_answers_head(Test *test)
                "HEAD has the length but no body");
 }
 
-static HttpServer *start_server(Test *test)
+static HttpServer *start_server_with(Test *test, HttpStreamHandler stream_handler)
 {
     HttpServerConfig config = {
         .address = S("127.0.0.1:0"),
         .limits = { .timeout_ms = 300 },
         .worker_count = 2,
         .handler = answer,
+        .stream_handler = stream_handler,
     };
     HttpServer *server = nullptr;
     Err err = { 0 };
     test_check(test, http_server_create(&config, &server, &err) == ERR_OK, "start a server");
     return server;
+}
+
+static HttpServer *start_server(Test *test)
+{
+    return start_server_with(test, nullptr);
 }
 
 // get sends a GET for path on a new connection and returns the response, or
@@ -327,13 +392,18 @@ typedef struct Https {
     HttpServer *server;
 } Https;
 
-static bool https_start(Test *test, Https *https)
+static bool https_start(Test *test, Https *https, HttpStreamHandler stream_handler)
 {
     String certificate = { 0 };
     String key = { 0 };
     Err err = { 0 };
     *https = (Https){ 0 };
-    HttpServerConfig config = { .address = S("127.0.0.1:0"), .handler = answer, .worker_count = 2 };
+    HttpServerConfig config = {
+        .address = S("127.0.0.1:0"),
+        .handler = answer,
+        .stream_handler = stream_handler,
+        .worker_count = 2,
+    };
     bool started = dir_create_temp(test->arena, S("libmc-https-"), &https->directory, &err) == ERR_OK &&
                    tls_self_signed(test->arena, S("localhost"), 1, &certificate, &key, &err) == ERR_OK &&
                    tls_self_signed(test->arena, S("localhost"), 1, &https->other_certificate, &https->other_key, &err) ==
@@ -386,7 +456,7 @@ static void https_stop(Https *https)
 static void http_server_serves_https(Test *test)
 {
     Https https;
-    if (!https_start(test, &https)) {
+    if (!https_start(test, &https, nullptr)) {
         https_stop(&https);
         return;
     }
@@ -430,6 +500,143 @@ static void http_server_serves_https(Test *test)
         http_client_destroy(other);
     }
     https_stop(&https);
+}
+
+static String sha256_hex(Arena *arena, String data)
+{
+    uint8_t digest[SHA256_LEN];
+    sha256(data, digest);
+    return hex_encode(arena, digest, SHA256_LEN);
+}
+
+static String header_value(const HttpResponse *response, const char *name)
+{
+    for (size_t i = 0; i < response->header_count; i++) {
+        if (str_equal_ignore_case(response->headers[i].name, S(name))) {
+            return response->headers[i].value;
+        }
+    }
+    return S("");
+}
+
+// converse sends each of messages in turn on a new connection, receiving
+// after each until the reply holds what follows it, or the server closes.
+static String converse(Arena *arena, uint16_t port, const char *const *messages, size_t count)
+{
+    int fd = -1;
+    StringBuilder reply = str_builder_create(arena, 256);
+    if (net_connect(S("127.0.0.1"), str_format(arena, "%u", port), RECEIVE_TIMEOUT_MS, &fd, nullptr) != ERR_OK ||
+        net_set_timeouts(fd, RECEIVE_TIMEOUT_MS, nullptr) != ERR_OK) {
+        return S("");
+    }
+    for (size_t i = 0; i + 1 < count; i += 2) {
+        if (net_send(fd, S(messages[i]), nullptr) != ERR_OK) {
+            break;
+        }
+        char buffer[1024];
+        size_t got = 0;
+        while (!str_contains(str_builder_finish(&reply), S(messages[i + 1])) &&
+               net_receive(fd, buffer, sizeof buffer, &got, nullptr) == ERR_OK && got > 0) {
+            str_builder_append(&reply, (String){ buffer, got });
+        }
+    }
+    net_close(fd);
+    return str_builder_finish(&reply);
+}
+
+// check_streams uploads and downloads size bytes through stream_answer at
+// base, a URL without a path.
+static void check_streams(Test *test, HttpClient *client, String base, size_t size)
+{
+    char *upload = arena_push(test->arena, size);
+    for (size_t i = 0; i < size; i++) {
+        upload[i] = (char)('a' + i % 26);
+    }
+    HttpRequest hash = {
+        .method = S("POST"),
+        .url = str_format(test->arena, "%.*s/hash", (int)base.len, base.data),
+        .body = (String){ upload, size },
+    };
+    HttpRequest download = { .url = str_format(test->arena, "%.*s/download?%zu", (int)base.len, base.data, size) };
+    HttpRequest chunked = { .url = str_format(test->arena, "%.*s/chunked?%zu", (int)base.len, base.data, size) };
+    HttpRequest head = { .method = S("HEAD"), .url = download.url };
+    HttpResponse response = { 0 };
+    Err err = { 0 };
+    test_check(test, http_send(client, test->arena, &hash, &response, &err) == ERR_OK, err.msg);
+    test_check_str(test, response.body, sha256_hex(test->arena, hash.body), "an upload is hashed as it arrives");
+    test_check(test, http_send(client, test->arena, &download, &response, &err) == ERR_OK, err.msg);
+    test_check(test, response.body.len == size && response.body.data[size - 1] == 'd', "a download sent in pieces");
+    test_check(test, http_send(client, test->arena, &chunked, &response, &err) == ERR_OK, err.msg);
+    test_check(test, response.body.len == size, "and one of a length not announced");
+    test_check(test, http_send(client, test->arena, &head, &response, &err) == ERR_OK, err.msg);
+    test_check_str(test, header_value(&response, "Content-Length"), str_format(test->arena, "%zu", size),
+                   "HEAD has the announced length");
+}
+
+static void http_server_streams_bodies_each_way(Test *test)
+{
+    HttpServer *server = start_server_with(test, stream_answer);
+    if (server == nullptr) {
+        return;
+    }
+    HttpClientConfig config = { .allow_plain_http = true, .max_response_bytes = BIG_BYTES };
+    HttpClient *client = nullptr;
+    Err err = { 0 };
+    test_check(test, http_client_create(&config, &client, &err) == ERR_OK, err.msg);
+    if (client != nullptr) {
+        check_streams(test, client, str_format(test->arena, "http://127.0.0.1:%u", http_server_port(server)),
+                      BIG_BYTES);
+        http_client_destroy(client);
+    }
+    static const char *const ABANDONED[] = { "GET /download?1000000000 HTTP/1.1\r\nHost: h\r\n\r\n", "dddd" };
+    test_check(test, str_contains(converse(test->arena, http_server_port(server), ABANDONED, countof(ABANDONED)), S("dddd")),
+               "a download its client leaves, which must not hold up stopping");
+    http_server_destroy(server);
+}
+
+static void http_server_streams_over_http2(Test *test)
+{
+    Https https;
+    HttpClient *client = nullptr;
+    Err err = { 0 };
+    if (https_start(test, &https, stream_answer)) {
+        test_check(test, https_client(https.ca_file, &client, &err) == ERR_OK, err.msg);
+    }
+    if (client != nullptr) {
+        String base = str_format(test->arena, "https://localhost:%u", http_server_port(https.server));
+        check_streams(test, client, base, TLS_STREAM_BYTES);
+        http_client_destroy(client);
+    }
+    https_stop(&https);
+}
+
+static void http_server_continues_streamed_uploads_only_when_read(Test *test)
+{
+    HttpServer *server = start_server_with(test, stream_answer);
+    if (server == nullptr) {
+        return;
+    }
+    uint16_t port = http_server_port(server);
+    static const char *const REFUSED[] = {
+        "POST /refuse HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 1000000\r\n\r\n",
+        "never sent",
+    };
+    String refused = converse(test->arena, port, REFUSED, countof(REFUSED));
+    test_check(test, str_starts_with(refused, S("HTTP/1.1 417 ")) && str_contains(refused, S("Connection: close")),
+               "an upload refused unread is not continued, and its connection closes");
+    String digest = sha256_hex(test->arena, S("hello"));
+    String hello = str_format(test->arena, "%.*s", (int)digest.len, digest.data);
+    const char *const READ[] = {
+        "POST /hash HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "HTTP/1.1 100 Continue\r\n\r\n",
+        "5\r\nhello\r\n0\r\n\r\n",
+        hello.data,
+    };
+    String read = converse(test->arena, port, READ, countof(READ));
+    test_check(test, str_starts_with(read, S("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n")) &&
+                         str_ends_with(read, hello),
+               "an upload read is continued, and a chunked one hashed");
+    http_server_destroy(server);
 }
 
 typedef struct SlowGet {
@@ -478,5 +685,8 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_closes_idle_clients", http_server_closes_idle_clients },
     { "http_server_serves_https", http_server_serves_https },
     { "http_server_finishes_requests_when_stopped", http_server_finishes_requests_when_stopped },
+    { "http_server_streams_bodies_each_way", http_server_streams_bodies_each_way },
+    { "http_server_streams_over_http2", http_server_streams_over_http2 },
+    { "http_server_continues_streamed_uploads_only_when_read", http_server_continues_streamed_uploads_only_when_read },
     { nullptr, nullptr },
 };
