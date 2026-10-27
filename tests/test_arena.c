@@ -137,6 +137,7 @@ const AbortCase ABORT_CASES[] = {
     { "terminal_round_trip", terminal_round_trip },
     { "signal_watch_round_trip", signal_watch_round_trip },
     { "reaper_round_trip", reaper_round_trip },
+    { "children_round_trip", children_round_trip },
     { nullptr, nullptr },
 };
 

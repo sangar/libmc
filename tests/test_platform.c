@@ -122,6 +122,23 @@ static void file_create_unique_validates_its_pattern(Test *test)
     test_check(test, dir_remove_all(dir, &err) == ERR_OK, "remove the tree");
 }
 
+// A stream has no size to read by, as standard input from a pipe has none.
+static void file_read_to_end_reads_a_stream(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    int fds[2];
+    test_check(test, net_pair(fds, &err) == ERR_OK, "a socket pair");
+    String text = str_repeat(a, S("æøå\n"), 1000);
+    test_check(test, file_write(fds[0], text, &err) == ERR_OK, "write more than the first buffer holds");
+    file_close(fds[0]);
+    String read;
+    test_check(test, file_read_to_end(a, fds[1], &read, &err) == ERR_OK && str_equal(read, text),
+               "everything up to the end comes back");
+    test_check(test, terminal_columns(fds[1]) == 80, "a socket is no terminal, so 80 columns");
+    file_close(fds[1]);
+}
+
 static void dir_create_needs_a_directory(Test *test)
 {
     Arena *a = test->arena;
@@ -779,6 +796,31 @@ void signal_watch_round_trip(void)
     }
 }
 
+// children_round_trip blocks the signals, as a program that watches them
+// does, and runs children that interrupt themselves. It aborts once the
+// interrupt ended both: a child that inherited the blocked signals would
+// exit 0.
+void children_round_trip(void)
+{
+    signals_block();
+    Arena *a = arena_create(0);
+    const char *const interrupted[] = { "sh", "-c", "kill -INT $$; exit 0" };
+    StringList argv = strlist_of(a, countof(interrupted), interrupted);
+    ProcessResult result;
+    bool captured_ended = process_run(a, argv, S(""), &result, nullptr) == ERR_OK && result.signal == SIGINT;
+    int exit_code = 0;
+    bool interactive_ended =
+        process_run_interactive(a, argv, &exit_code, nullptr) == ERR_OK && exit_code == 128 + SIGINT;
+    if (captured_ended && interactive_ended) {
+        abort();
+    }
+}
+
+static void children_start_with_default_signals(Test *test)
+{
+    test_check_aborts(test, "children_round_trip", "a child ends on an interrupt its parent blocks");
+}
+
 static void signal_watch_calls_back(Test *test)
 {
     test_check_aborts(test, "signal_watch_round_trip", "a stop signal reaches the callback, and the watch stops");
@@ -859,6 +901,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
     { "file_create_unique_validates_its_pattern", file_create_unique_validates_its_pattern },
+    { "file_read_to_end_reads_a_stream", file_read_to_end_reads_a_stream },
     { "dir_create_needs_a_directory", dir_create_needs_a_directory },
     { "paths_resolve_against_the_system", paths_resolve_against_the_system },
     { "look_path_survives_long_entries", look_path_survives_long_entries },
@@ -884,6 +927,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "file_find_upward_climbs", file_find_upward_climbs },
     { "dir_runtime_is_private", dir_runtime_is_private },
     { "signal_watch_calls_back", signal_watch_calls_back },
+    { "children_start_with_default_signals", children_start_with_default_signals },
     { "frames_cross_a_socket_whole", frames_cross_a_socket_whole },
     { nullptr, nullptr },
 };

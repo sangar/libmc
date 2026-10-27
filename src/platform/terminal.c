@@ -171,6 +171,15 @@ void terminal_close(Terminal *terminal)
     arena_destroy(terminal->arena);
 }
 
+size_t terminal_columns(int fd)
+{
+    struct winsize size;
+    if (ioctl(fd, TIOCGWINSZ, &size) != 0 || size.ws_col == 0) {
+        return 80;
+    }
+    return size.ws_col;
+}
+
 TerminalSize terminal_size(Terminal *terminal)
 {
     struct winsize size;

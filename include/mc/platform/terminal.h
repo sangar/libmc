@@ -13,6 +13,11 @@ typedef struct Terminal Terminal;
 // is not redirected.
 bool terminal_is_terminal(int fd);
 
+// terminal_columns is how many columns wide the terminal on fd is, such as
+// stdout's, without opening it: 80 when fd is not a terminal or the system
+// does not say.
+size_t terminal_columns(int fd);
+
 // terminal_open opens the controlling terminal in raw mode. Window size
 // changes are reported through terminal_wait; for that the calling thread
 // blocks their signal, so open the terminal before starting threads.
