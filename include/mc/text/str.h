@@ -71,6 +71,9 @@ String str_quote(Arena *arena, String s);
 // str_percent_encode encodes everything but RFC 3986 unreserved characters,
 // and '/' too unless keep_slash.
 String str_percent_encode(Arena *arena, String s, bool keep_slash);
+// str_percent_decode decodes each %XX in s into *decoded, in arena, and
+// reports whether every % began one; '+' stays as it is, as in a URL path.
+bool str_percent_decode(Arena *arena, String s, String *decoded);
 
 // The parts of str_split and str_fields are views into s.
 StringList str_split(Arena *arena, String s, char separator);
