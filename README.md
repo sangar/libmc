@@ -42,7 +42,7 @@ Then:
 | `./nob release` | Optimised library: `out/release/libmc.a` |
 | `./nob test` | Builds and runs the tests under the sanitizers |
 | `./nob check` | Runs the `modern-c` contract checker, then the tests, then the tests again under ThreadSanitizer (see below) |
-| `./nob tsan` | Builds and runs the tests under ThreadSanitizer: `out/tsan/` |
+| `./nob tsan` | Library under ThreadSanitizer, for a consumer's threaded tests: `out/tsan/libmc.a` |
 | `./nob fuzz` | Library instrumented for libFuzzer with AddressSanitizer and UBSan, for a consumer's fuzzer; `$CC` must be a clang that has libFuzzer: `out/fuzz/libmc.a` |
 | `./nob cross` | Release library for every platform: `out/<platform>/release/libmc.a` |
 | `./nob clean` | Removes `out/` |

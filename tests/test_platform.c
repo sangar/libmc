@@ -525,6 +525,13 @@ static void unix_sockets_carry_bytes(Test *test)
     size_t got;
     test_check(test, net_receive(server, buffer, sizeof buffer, &got, &err) == ERR_OK, "receive");
     test_check_str(test, (String){ buffer, got }, S("ping"), "the bytes arrive");
+    net_shutdown_write(client);
+    test_check(test, net_receive(server, buffer, sizeof buffer, &got, &err) == ERR_OK && got == 0,
+               "shutting down writing ends what the peer reads");
+    test_check(test, net_send(server, S("pong"), &err) == ERR_OK &&
+                         net_receive(client, buffer, sizeof buffer, &got, &err) == ERR_OK &&
+                         str_equal((String){ buffer, got }, S("pong")),
+               "and still receives");
 
     Receiver receiver = { .fd = server, .got = 99 };
     Thread thread;

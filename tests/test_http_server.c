@@ -654,6 +654,12 @@ static void http_server_continues_streamed_uploads_only_when_read(Test *test)
     test_check(test, str_starts_with(read, S("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n")) &&
                          str_ends_with(read, hello),
                "an upload read is continued, and a chunked one hashed");
+    static const char *const MALFORMED[] = {
+        "POST /hash HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+        "never sent",
+    };
+    test_check(test, str_starts_with(converse(test->arena, port, MALFORMED, countof(MALFORMED)), S("HTTP/1.1 400 ")),
+               "a malformed body read is answered 400");
     http_server_destroy(server);
 }
 

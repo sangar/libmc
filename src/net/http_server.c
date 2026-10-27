@@ -529,9 +529,11 @@ static bool end_response(Connection *connection, HttpExchange *exchange)
     if (connection->closed) {
         return true;
     }
+    // A handler that failed on a malformed body is answered as the parser would have.
+    unsigned failure = exchange->in_error == ERR_PARSE ? 400 : 500;
     if (connection->http2 != nullptr) {
         if (!exchange->head_sent && !http2_stream_closed(exchange->stream)) {
-            http2_start(connection->http2, exchange->stream, 500, nullptr, 0, 0);
+            http2_start(connection->http2, exchange->stream, failure, nullptr, 0, 0);
         }
         http2_end(connection->http2, exchange->stream, exchange->complete);
         return true;
@@ -540,7 +542,7 @@ static bool end_response(Connection *connection, HttpExchange *exchange)
         return false;
     }
     if (!exchange->head_sent) {
-        http1_start(connection->http, 500, nullptr, 0, 0, connection->loop->stopping);
+        http1_start(connection->http, failure, nullptr, 0, 0, connection->loop->stopping);
     }
     connection->closing = !http1_end(connection->http, exchange->complete);
     connection->output = http1_take_output(connection->http);
