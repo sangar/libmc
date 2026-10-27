@@ -20,6 +20,8 @@ enum {
     BIG_BYTES = 8 << 20,
     TLS_BIG_BYTES = 64 << 10,
     UPLOAD_BYTES = 64 << 10,
+    // More than socket buffers hold, so the client is still sending when the server answers.
+    UPLOAD_REFUSED_BYTES = 4 << 20,
     // Streamed bodies pass through 64 KiB pipes and HTTP/2's 64 KiB windows.
     TLS_STREAM_BYTES = 200 << 10,
     READ_PIECE_BYTES = 4096,
@@ -639,6 +641,49 @@ static void http_server_continues_streamed_uploads_only_when_read(Test *test)
     http_server_destroy(server);
 }
 
+// upload sends a POST of size bytes as a client that reads the response only
+// once its body is sent, and gives the response, or empty when the server
+// reset the connection on the way.
+static String upload(Arena *arena, uint16_t port, const char *path, size_t size)
+{
+    int fd = -1;
+    if (net_connect(S("127.0.0.1"), str_format(arena, "%u", port), RECEIVE_TIMEOUT_MS, &fd, nullptr) != ERR_OK) {
+        return S("");
+    }
+    String head = str_format(arena, "POST %s HTTP/1.1\r\nHost: h\r\nContent-Length: %zu\r\n\r\n", path, size);
+    char *body = arena_push(arena, size);
+    memset(body, 'u', size);
+    StringBuilder reply = str_builder_create(arena, 256);
+    if (net_set_timeouts(fd, RECEIVE_TIMEOUT_MS, nullptr) == ERR_OK && net_send(fd, head, nullptr) == ERR_OK &&
+        net_send(fd, (String){ body, size }, nullptr) == ERR_OK) {
+        char buffer[1024];
+        size_t got = 0;
+        while (net_receive(fd, buffer, sizeof buffer, &got, nullptr) == ERR_OK && got > 0) {
+            str_builder_append(&reply, (String){ buffer, got });
+        }
+    }
+    net_close(fd);
+    return str_builder_finish(&reply);
+}
+
+static void http_server_lets_a_refused_upload_finish(Test *test)
+{
+    HttpServer *streaming = start_server_with(test, stream_answer);
+    if (streaming != nullptr) {
+        test_check(test, str_starts_with(upload(test->arena, http_server_port(streaming), "/refuse", UPLOAD_REFUSED_BYTES),
+                                         S("HTTP/1.1 417 ")),
+                   "an upload its handler refused unread");
+        http_server_destroy(streaming);
+    }
+    HttpServer *buffered = start_server(test);
+    if (buffered != nullptr) {
+        test_check(test, str_starts_with(upload(test->arena, http_server_port(buffered), "/", UPLOAD_REFUSED_BYTES),
+                                         S("HTTP/1.1 413 ")),
+                   "an upload over the size limit");
+        http_server_destroy(buffered);
+    }
+}
+
 typedef struct SlowGet {
     Arena *arena;
     uint16_t port;
@@ -684,6 +729,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_sends_bodies_larger_than_the_socket_buffer", http_server_sends_bodies_larger_than_the_socket_buffer },
     { "http_server_closes_idle_clients", http_server_closes_idle_clients },
     { "http_server_serves_https", http_server_serves_https },
+    { "http_server_lets_a_refused_upload_finish", http_server_lets_a_refused_upload_finish },
     { "http_server_finishes_requests_when_stopped", http_server_finishes_requests_when_stopped },
     { "http_server_streams_bodies_each_way", http_server_streams_bodies_each_way },
     { "http_server_streams_over_http2", http_server_streams_over_http2 },
