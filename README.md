@@ -168,7 +168,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/net/tls.h` | TLS for servers on mbedTLS: TLS 1.2 and 1.3 with the protocols ALPN offers, h2 and http/1.1 unless told, the certificate swapped while serving for renewals, connections over blocking sockets for servers that read and write in turn and for STARTTLS, and self-signed certificates for development |
 | | `mc/net/acme.h` | Certificates from Let's Encrypt or another ACME CA: HTTP-01 answered on port 80, which otherwise redirects to https, or TLS-ALPN-01 on port 443; account and certificate kept in a storage directory shared by processes, and renewed in the background two thirds into the certificate's lifetime |
 | | `mc/net/s3.h` | S3 and the stores that speak its API: objects in memory or files, multipart uploads, metadata, paged listing, retries with backoff, credentials found as the AWS tools find them; thread-safe, with pooled connections |
-| | `mc/net/sigv4_verify.h` | AWS Signature Version 4 checked as an S3-compatible server does: the Authorization header or a presigned query, clock skew and expiry, the payload hash mode, and each aws-chunked chunk's signature |
+| | `mc/net/sigv4_verify.h` | AWS Signature Version 4 checked as an S3-compatible server does: the Authorization header or a presigned query, clock skew and expiry, the payload hash mode, and bodies read with the aws-chunked framing taken off and each chunk, the trailer or the whole body checked |
 | | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
