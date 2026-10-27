@@ -3,12 +3,16 @@
 #include "mc/text/fmt.h"
 #include "mc/text/glob.h"
 #include "mc/text/path.h"
+#include "mc/crypto/crc32.h"
+#include "mc/crypto/md5.h"
 #include "mc/crypto/sha256.h"
 #include "mc/crypto/sigv4.h"
 #include "mc/text/table.h"
 #include "mc/text/unicode.h"
 #include "mc/container/sort.h"
 #include "mc/text/utf8.h"
+
+#include <string.h>
 
 static void utf8_roundtrip_and_validation(Test *test)
 {
@@ -247,6 +251,36 @@ static void sha256_known_vectors(Test *test)
                    S("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), "RFC 4231 HMAC case 2");
 }
 
+static void md5_known_vectors(Test *test)
+{
+    uint8_t digest[MD5_LEN];
+    md5(S(""), digest);
+    test_check_str(test, hex_encode(test->arena, digest, MD5_LEN), S("d41d8cd98f00b204e9800998ecf8427e"), "empty input");
+    md5(S("abc"), digest);
+    test_check_str(test, hex_encode(test->arena, digest, MD5_LEN), S("900150983cd24fb0d6963f7d28e17f72"), "abc");
+    // memset, as str_repeat takes seconds for a million bytes under the sanitizers on slow runners.
+    size_t million = 1000000;
+    char *a = arena_push(test->arena, million);
+    memset(a, 'a', million);
+    Md5 hash;
+    md5_init(&hash);
+    for (size_t at = 0; at < million; at += 997) {
+        md5_update(&hash, a + at, min_size(997, million - at));
+    }
+    md5_final(&hash, digest);
+    test_check_str(test, hex_encode(test->arena, digest, MD5_LEN), S("7707d6ae4e027c70eea2a935c2296f21"),
+                   "a million a's in uneven pieces");
+}
+
+static void crc32_check_values(Test *test)
+{
+    test_check(test, crc32_update(0, "123456789", 9) == 0xcbf43926, "CRC-32 check value");
+    test_check(test, crc32c_update(0, "123456789", 9) == 0xe3069283, "CRC-32C check value");
+    test_check(test, crc32_update(crc32_update(0, "1234", 4), "56789", 5) == 0xcbf43926, "CRC-32 continued");
+    test_check(test, crc32c_update(crc32c_update(0, "1234", 4), "56789", 5) == 0xe3069283, "CRC-32C continued");
+    test_check(test, crc32_update(0, "", 0) == 0 && crc32c_update(0, "", 0) == 0, "nothing");
+}
+
 static int compare_ints(const void *context, const void *a, const void *b)
 {
     unused(context);
@@ -373,6 +407,8 @@ const TestCase TEXT_TESTS[] = {
     { "fmt_times_and_numbers", fmt_times_and_numbers },
     { "civil_dates_convert", civil_dates_convert },
     { "sha256_known_vectors", sha256_known_vectors },
+    { "md5_known_vectors", md5_known_vectors },
+    { "crc32_check_values", crc32_check_values },
     { "sort_orders_and_selects", sort_orders_and_selects },
     { "table_aligns_columns", table_aligns_columns },
     { "sigv4_signs_like_aws", sigv4_signs_like_aws },
