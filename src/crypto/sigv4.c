@@ -97,15 +97,20 @@ String sigv4_authorization(Arena *arena, SigV4Request request, SigV4Credentials 
                                 request.amz_date.data, (int)scope.len, scope.data, (int)request_hash.len,
                                 request_hash.data);
 
-    String key = hmac(arena, str_concat(arena, S("AWS4"), credentials.secret_key), date);
-    key = hmac(arena, key, credentials.region);
-    key = hmac(arena, key, credentials.service);
-    key = hmac(arena, key, S("aws4_request"));
+    String key = sigv4_signing_key(arena, credentials.secret_key, date, credentials.region, credentials.service);
     String signature = hmac(arena, key, to_sign);
     String signature_hex = hex_encode(arena, (const uint8_t *)signature.data, signature.len);
     return str_format(arena, "AWS4-HMAC-SHA256 Credential=%.*s/%.*s, SignedHeaders=%.*s, Signature=%.*s",
                       (int)credentials.access_key.len, credentials.access_key.data, (int)scope.len, scope.data,
                       (int)signed_names.len, signed_names.data, (int)signature_hex.len, signature_hex.data);
+}
+
+String sigv4_signing_key(Arena *arena, String secret_key, String date, String region, String service)
+{
+    String key = hmac(arena, str_concat(arena, S("AWS4"), secret_key), date);
+    key = hmac(arena, key, region);
+    key = hmac(arena, key, service);
+    return hmac(arena, key, S("aws4_request"));
 }
 
 String sigv4_payload_hash(Arena *arena, String payload)
