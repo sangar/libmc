@@ -4,6 +4,7 @@
 #include "mc/term/layout.h"
 #include "mc/term/progress.h"
 #include "mc/term/screen.h"
+#include "mc/text/utf8.h"
 
 static const Rgb WHITE = { 255, 255, 255 };
 static const Rgb BLACK = { 0, 0, 0 };
@@ -105,10 +106,67 @@ static void screen_draws_styled_text(Test *test)
     screen_destroy(screen);
 }
 
+static String row_text(Test *test, Screen *screen, int y)
+{
+    StringBuilder out = str_builder_create(test->arena, 64);
+    for (int x = 0; x < screen_width(screen); x++) {
+        uint32_t glyph = screen_cell(screen, x, y)->glyph;
+        char bytes[UTF8_MAX_BYTES];
+        str_builder_append(&out, (String){ bytes, glyph != 0 ? utf8_encode(glyph, bytes) : 0 });
+    }
+    return str_builder_finish(&out);
+}
+
+static void screen_wraps_log_lines(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 4, 3);
+    screen_paint(screen, (Rect){ 0, 0, 4, 3 }, BLACK);
+    String line = S("\x1b[31mabcdefg\x1b[0m界");
+    test_check(test, wrapped_rows(line, 4) == 3, "the wide glyph goes to the next row whole");
+    TextStyle style = { .fg = WHITE };
+    test_check(test, screen_wrapped(screen, (Rect){ 0, 0, 4, 3 }, 0, line, style) == 3, "three rows drawn");
+    test_check_str(test, row_text(test, screen, 0), S("abcd"), "the first row");
+    test_check_str(test, row_text(test, screen, 1), S("efg "), "the rest of the text wraps");
+    test_check_str(test, row_text(test, screen, 2), S("界  "), "and the wide glyph that does not fit");
+    test_check(test, rgb_equal(screen_cell(screen, 0, 1)->fg, xterm_to_rgb(1)), "colour carries over the wrap");
+
+    screen_paint(screen, (Rect){ 0, 0, 4, 3 }, BLACK);
+    test_check(test, screen_wrapped(screen, (Rect){ 0, 0, 4, 1 }, 1, line, style) == 1, "rows past rect stay out");
+    test_check_str(test, row_text(test, screen, 0), S("efg "), "skipped rows stay out");
+
+    int row, column;
+    wrapped_end(S("abcd"), 4, &row, &column);
+    test_check(test, row == 1 && column == 0, "a full row puts the end on the next");
+    wrapped_end(S("a\tb"), 20, &row, &column);
+    test_check(test, row == 0 && column == 9, "a tab goes to the eighth column");
+    screen_destroy(screen);
+}
+
+static void screen_wraps_with_the_theme_colours(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 3, 1);
+    screen_paint(screen, (Rect){ 0, 0, 3, 1 }, BLACK);
+    Rgb ansi[16] = { 0 };
+    ansi[2] = rgb_hex(0x00aa55);
+    TextStyle style = { .fg = WHITE, .ansi = ansi };
+    screen_wrapped(screen, (Rect){ 0, 0, 3, 1 }, 0, S("\x1b[32ma\x1b[7mb\x1b[0mc"), style);
+    Cell *a = screen_cell(screen, 0, 0);
+    Cell *b = screen_cell(screen, 1, 0);
+    Cell *c = screen_cell(screen, 2, 0);
+    test_check(test, rgb_equal(a->fg, ansi[2]), "a basic colour comes from the palette");
+    test_check(test, rgb_equal(b->fg, BLACK) && rgb_equal(b->bg, ansi[2]), "reverse video swaps the colours");
+    test_check(test, rgb_equal(c->fg, WHITE) && rgb_equal(c->bg, BLACK), "a reset ends it");
+    screen_destroy(screen);
+}
+
 const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_writes_only_what_changed", screen_writes_only_what_changed },
     { "screen_keeps_wide_glyphs_whole", screen_keeps_wide_glyphs_whole },
     { "graphs_plot_in_braille", graphs_plot_in_braille },
     { "screen_draws_styled_text", screen_draws_styled_text },
+    { "screen_wraps_log_lines", screen_wraps_log_lines },
+    { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
     { nullptr, nullptr },
 };

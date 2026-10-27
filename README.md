@@ -175,7 +175,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/term/spinner.h`, `spring.h`, `progress.h` | Spinners from cli-spinners, damped springs as in Harmonica, progress bars in eighths of a column |
 | | `mc/term/input.h` | Keys, mouse and bracketed paste decoded from a terminal's bytes |
 | | `mc/term/list.h` | A list to pick from, scrolled to keep the cursor in view |
-| | `mc/term/screen.h` | A full-screen grid of cells that writes only what changed, the way btop draws, and takes styled text too |
+| | `mc/term/screen.h` | A full-screen grid of cells that writes only what changed, the way btop draws, and takes styled text too, wrapped as in a log view with the theme's 16 colours |
 | | `mc/term/draw.h`, `history.h` | Panels with titles, meters, braille graphs and sparklines of a history of samples |
 | | `mc/term/logbuf.h` | A program's terminal output as lines: colours kept, carriage returns rewriting the line, other control dropped |
 

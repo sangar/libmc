@@ -49,9 +49,31 @@ void screen_glyph(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t 
 int screen_text(Screen *screen, int x, int y, int max_columns, String text, Rgb fg, uint8_t attrs);
 // screen_styled is screen_text for text styled with SGR sequences, such as
 // what style_append, box_render and progress_append write: they set the
-// colours and attributes, and a reset goes back to fg and attrs over the
-// backgrounds already there. Other escape sequences are skipped.
+// colours, attributes and reverse video, and a reset goes back to fg and
+// attrs over the backgrounds already there. Other escape sequences are
+// skipped.
 int screen_styled(Screen *screen, int x, int y, int max_columns, String text, Rgb fg, uint8_t attrs);
+
+// TextStyle is how screen_wrapped's text looks before its first SGR sequence
+// and after a reset. ansi holds the 16 basic colours, as a theme picks them,
+// or is nullptr for xterm's.
+typedef struct TextStyle {
+    Rgb fg;
+    uint8_t attrs;
+    const Rgb *ansi;
+} TextStyle;
+
+// screen_wrapped draws styled text, such as a line of a LogBuffer, as
+// screen_styled does, but wraps it at rect's width and puts tab stops every
+// eighth column. It skips the first skip_rows rows, draws at most rect.height
+// and returns how many it drew.
+int screen_wrapped(Screen *screen, Rect rect, int skip_rows, String text, TextStyle style);
+// wrapped_rows is how many rows text takes wrapped at width.
+int wrapped_rows(String text, int width);
+// wrapped_end stores the row and column just after the last glyph of text
+// wrapped at width, where a cursor at its end would be.
+void wrapped_end(String text, int width, int *row, int *column);
+
 // screen_shade darkens every colour in rect, as under an overlay.
 void screen_shade(Screen *screen, Rect rect, double factor);
 // screen_render appends to out what brings the terminal from the last

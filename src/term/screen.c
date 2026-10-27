@@ -5,7 +5,7 @@
 #include "mc/term/ansi.h"
 #include "mc/text/utf8.h"
 
-enum { ESC = 0x1b, SGR_PARAMS = 32 };
+enum { ESC = 0x1b, SGR_PARAMS = 32, TAB_STOP = 8 };
 
 struct Screen {
     Arena *arena;   // the Screen itself
@@ -148,6 +148,7 @@ typedef struct Ink {
     Rgb fg;
     Rgb bg;
     bool has_bg;
+    bool reverse;
     uint8_t attrs;
 } Ink;
 
@@ -174,7 +175,12 @@ static bool extended_color(const unsigned *params, size_t count, size_t *i, Rgb 
     return false;
 }
 
-static void apply_sgr(Ink *ink, String text, Ink plain)
+static Rgb basic_color(const Rgb *ansi, unsigned index)
+{
+    return ansi != nullptr ? ansi[index] : xterm_to_rgb((uint8_t)index);
+}
+
+static void apply_sgr(Ink *ink, String text, Ink plain, const Rgb *ansi)
 {
     unsigned params[SGR_PARAMS];
     size_t count = 0;
@@ -197,17 +203,19 @@ static void apply_sgr(Ink *ink, String text, Ink plain)
             ink->attrs = (uint8_t)(ink->attrs & ~ATTR_ITALIC);
         } else if (p == 24) {
             ink->attrs = (uint8_t)(ink->attrs & ~ATTR_UNDERLINE);
+        } else if (p == 7 || p == 27) {
+            ink->reverse = p == 7;
         } else if (p >= 30 && p <= 37) {
-            ink->fg = xterm_to_rgb((uint8_t)(p - 30));
+            ink->fg = basic_color(ansi, p - 30);
         } else if (p >= 90 && p <= 97) {
-            ink->fg = xterm_to_rgb((uint8_t)(p - 90 + 8));
+            ink->fg = basic_color(ansi, p - 90 + 8);
         } else if (p == 39) {
             ink->fg = plain.fg;
         } else if (p >= 40 && p <= 47) {
-            ink->bg = xterm_to_rgb((uint8_t)(p - 40));
+            ink->bg = basic_color(ansi, p - 40);
             ink->has_bg = true;
         } else if (p >= 100 && p <= 107) {
-            ink->bg = xterm_to_rgb((uint8_t)(p - 100 + 8));
+            ink->bg = basic_color(ansi, p - 100 + 8);
             ink->has_bg = true;
         } else if (p == 49) {
             ink->has_bg = false;
@@ -219,34 +227,133 @@ static void apply_sgr(Ink *ink, String text, Ink plain)
     }
 }
 
+// next_glyph decodes the glyph at *position, applying the SGR sequences
+// before it to ink and skipping other escape sequences, and is false at the
+// end of text.
+static bool next_glyph(String text, size_t *position, Ink *ink, Ink plain, const Rgb *ansi, uint32_t *glyph)
+{
+    while (*position < text.len && text.data[*position] == ESC) {
+        size_t end = ansi_escape_end(text, *position);
+        if (end - *position >= 3 && text.data[*position + 1] == '[' && text.data[end - 1] == 'm') {
+            apply_sgr(ink, str_slice(text, *position + 2, end - 1), plain, ansi);
+        }
+        *position = end;
+    }
+    if (*position >= text.len) {
+        return false;
+    }
+    utf8_decode(text, position, glyph);
+    return true;
+}
+
+// put_ink is put with ink's background, or with reverse video the colours
+// swapped over the background already there.
+static int put_ink(Screen *screen, int x, int y, uint32_t glyph, Ink ink)
+{
+    Cell *cell = screen_cell(screen, x, y);
+    if (cell == nullptr) {
+        return 0;
+    }
+    Rgb bg = ink.has_bg ? ink.bg : cell->bg;
+    if (ink.reverse) {
+        bg = ink.fg;
+        ink.fg = ink.has_bg ? ink.bg : cell->bg;
+    }
+    int written = put(screen, x, y, glyph, ink.fg, ink.attrs);
+    for (int i = 0; i < written; i++) {
+        screen_cell(screen, x + i, y)->bg = bg;
+    }
+    return written;
+}
+
 int screen_styled(Screen *screen, int x, int y, int max_columns, String text, Rgb fg, uint8_t attrs)
 {
     Ink plain = { .fg = fg, .attrs = attrs };
     Ink ink = plain;
     int used = 0;
     size_t position = 0;
-    while (position < text.len) {
-        if (text.data[position] == ESC) {
-            size_t end = ansi_escape_end(text, position);
-            if (end - position >= 3 && text.data[position + 1] == '[' && text.data[end - 1] == 'm') {
-                apply_sgr(&ink, str_slice(text, position + 2, end - 1), plain);
-            }
-            position = end;
-            continue;
-        }
-        uint32_t codepoint;
-        utf8_decode(text, &position, &codepoint);
+    uint32_t codepoint;
+    while (next_glyph(text, &position, &ink, plain, nullptr, &codepoint)) {
         int width = utf8_codepoint_width(codepoint);
         if (used + width > max_columns) {
             break;
         }
-        int written = put(screen, x + used, y, codepoint, ink.fg, ink.attrs);
-        for (int i = 0; ink.has_bg && i < written; i++) {
-            screen_cell(screen, x + used + i, y)->bg = ink.bg;
-        }
+        put_ink(screen, x + used, y, codepoint, ink);
         used += width;
     }
     return used;
+}
+
+// Wrap places the glyphs of styled text in rows of rect.width columns and,
+// with a screen, draws the rows from skip_rows on that fit in rect.
+typedef struct Wrap {
+    Screen *screen;
+    Rect rect;
+    int skip_rows;
+    int row;
+    int column;
+    int line_column; // for tab stops, which count from the start of the text
+} Wrap;
+
+static void wrap_place(Wrap *wrap, uint32_t glyph, int width, Ink ink)
+{
+    if (wrap->column + width > wrap->rect.width && wrap->column > 0) {
+        wrap->row++;
+        wrap->column = 0;
+    }
+    int shown_row = wrap->row - wrap->skip_rows;
+    if (wrap->screen != nullptr && shown_row >= 0 && shown_row < wrap->rect.height) {
+        put_ink(wrap->screen, wrap->rect.x + wrap->column, wrap->rect.y + shown_row, glyph, ink);
+    }
+    wrap->column += width;
+    wrap->line_column += width;
+}
+
+static void wrap_text(Wrap *wrap, String text, TextStyle style)
+{
+    if (wrap->rect.width < 1) {
+        wrap->rect.width = 1;
+    }
+    Ink plain = { .fg = style.fg, .attrs = style.attrs };
+    Ink ink = plain;
+    size_t position = 0;
+    uint32_t codepoint;
+    while (next_glyph(text, &position, &ink, plain, style.ansi, &codepoint)) {
+        if (codepoint == '\t') {
+            for (int spaces = TAB_STOP - wrap->line_column % TAB_STOP; spaces > 0; spaces--) {
+                wrap_place(wrap, ' ', 1, ink);
+            }
+            continue;
+        }
+        int width = utf8_codepoint_width(codepoint);
+        if (width > 0) {
+            wrap_place(wrap, codepoint, width, ink);
+        }
+    }
+}
+
+int screen_wrapped(Screen *screen, Rect rect, int skip_rows, String text, TextStyle style)
+{
+    Wrap wrap = { .screen = screen, .rect = rect, .skip_rows = skip_rows };
+    wrap_text(&wrap, text, style);
+    int rows = wrap.row + 1 - skip_rows;
+    return rows < 0 ? 0 : rows > rect.height ? rect.height : rows;
+}
+
+int wrapped_rows(String text, int width)
+{
+    Wrap wrap = { .rect.width = width };
+    wrap_text(&wrap, text, (TextStyle){ 0 });
+    return wrap.row + 1;
+}
+
+void wrapped_end(String text, int width, int *row, int *column)
+{
+    Wrap wrap = { .rect.width = width };
+    wrap_text(&wrap, text, (TextStyle){ 0 });
+    bool full = wrap.column >= wrap.rect.width;
+    *row = wrap.row + (full ? 1 : 0);
+    *column = full ? 0 : wrap.column;
 }
 
 void screen_shade(Screen *screen, Rect rect, double factor)
