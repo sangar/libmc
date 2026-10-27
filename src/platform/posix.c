@@ -1912,6 +1912,36 @@ Error net_local_address(Arena *arena, int fd, String *address, Err *err)
     return ERR_OK;
 }
 
+// listen_on listens on the first of addresses of family, or of any family
+// for AF_UNSPEC, that takes it, and gives its socket or -1. An IPv6 socket
+// takes IPv4 connections too, where the system allows it.
+static int listen_on(const struct addrinfo *addresses, int family, int *failure)
+{
+    for (const struct addrinfo *a = addresses; a != nullptr; a = a->ai_next) {
+        if (family != AF_UNSPEC && a->ai_family != family) {
+            continue;
+        }
+        int sock = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (sock < 0) {
+            *failure = errno;
+            continue;
+        }
+        int one = 1;
+        int zero = 0;
+        if (a->ai_family == AF_INET6) {
+            unused(setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero));
+        }
+        if (!prepare_socket(sock) || setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
+            bind(sock, a->ai_addr, a->ai_addrlen) != 0 || listen(sock, 64) != 0) {
+            *failure = errno;
+            close(sock);
+            continue;
+        }
+        return sock;
+    }
+    return -1;
+}
+
 Error net_listen(String address, int *fd, Err *err)
 {
     *fd = -1;
@@ -1935,20 +1965,13 @@ Error net_listen(String address, int *fd, Err *err)
         return err_set(err, ERR_NETWORK, "listen %s:%s: %s", host.text, port.text, gai_strerror(rc));
     }
     int failure = EADDRNOTAVAIL;
-    for (struct addrinfo *a = addresses; a != nullptr && *fd < 0; a = a->ai_next) {
-        int sock = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (sock < 0) {
-            failure = errno;
-            continue;
-        }
-        int one = 1;
-        if (!prepare_socket(sock) || setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
-            bind(sock, a->ai_addr, a->ai_addrlen) != 0 || listen(sock, 64) != 0) {
-            failure = errno;
-            close(sock);
-            continue;
-        }
-        *fd = sock;
+    // With no host, an IPv6 socket that also takes IPv4 comes first, so both
+    // reach the server; glibc lists IPv4's wildcard first.
+    if (host.text[0] == '\0') {
+        *fd = listen_on(addresses, AF_INET6, &failure);
+    }
+    if (*fd < 0) {
+        *fd = listen_on(addresses, AF_UNSPEC, &failure);
     }
     freeaddrinfo(addresses);
     if (*fd < 0) {

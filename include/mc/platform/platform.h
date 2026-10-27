@@ -257,7 +257,8 @@ void signal_watch_stop(SignalWatch *watch);
 
 // ---- network ----
 
-// net_listen binds host:port, all interfaces when host is empty, and listens.
+// net_listen binds host:port and listens. An empty host is every interface,
+// IPv6 and IPv4 on one socket where the system has IPv6, IPv4 alone where not.
 [[nodiscard]] Error net_listen(String address, int *fd, Err *err);
 // net_local_address is the host:port fd is bound to, with the port chosen
 // when it listened on port 0, in the form net_listen and net_connect take.

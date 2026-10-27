@@ -338,6 +338,40 @@ static void network_rejects_a_bad_address(Test *test)
                "connecting to a closed port is ERR_NETWORK");
 }
 
+static bool connects(Test *test, String host, String port)
+{
+    int fd = -1;
+    bool connected = net_connect(host, port, 1000, &fd, nullptr) == ERR_OK;
+    if (connected) {
+        net_close(fd);
+    }
+    return connected;
+}
+
+// network_listens_on_ipv4_and_ipv6_with_no_host checks IPv6 only where the
+// system has it, as some containers do not.
+static void network_listens_on_ipv4_and_ipv6_with_no_host(Test *test)
+{
+    int listener = -1;
+    int probe = -1;
+    String address = { 0 };
+    size_t colon = 0;
+    Err err = { 0 };
+    test_check(test, net_listen(S(":0"), &listener, &err) == ERR_OK, "listen with no host");
+    if (listener < 0) {
+        return;
+    }
+    test_check(test, net_local_address(test->arena, listener, &address, &err) == ERR_OK, "its address");
+    String port = str_find_last_char(address, ':', &colon) ? str_slice(address, colon + 1, address.len) : S("");
+    test_check(test, connects(test, S("127.0.0.1"), port), "an IPv4 client connects");
+    bool has_ipv6 = net_listen(S("::1:0"), &probe, nullptr) == ERR_OK;
+    if (has_ipv6) {
+        net_close(probe);
+        test_check(test, connects(test, S("::1"), port), "an IPv6 client connects");
+    }
+    net_close(listener);
+}
+
 static const DirEntry *find_entry(const DirEntryList *entries, String name)
 {
     for (size_t i = 0; i < entries->count; i++) {
@@ -918,6 +952,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "socket_pairs_carry_bytes_without_waiting", socket_pairs_carry_bytes_without_waiting },
     { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
     { "sockets_move_bytes_without_waiting", sockets_move_bytes_without_waiting },
+    { "network_listens_on_ipv4_and_ipv6_with_no_host", network_listens_on_ipv4_and_ipv6_with_no_host },
     { "poller_reports_ready_sockets", poller_reports_ready_sockets },
     { "poller_wakes_from_another_thread", poller_wakes_from_another_thread },
     { "file_lock_keeps_out_a_second_holder", file_lock_keeps_out_a_second_holder },
