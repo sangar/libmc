@@ -2,7 +2,9 @@
 
 #include "mc/net/http.h"
 #include "mc/net/http_server.h"
+#include "mc/net/tls.h"
 #include "mc/platform/platform.h"
+#include "mc/text/path.h"
 
 #include <string.h>
 
@@ -10,11 +12,10 @@
 // http_server_exchange, and on 127.0.0.1 against raw sockets and libmc's own
 // HTTP client.
 
-enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20 };
+enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BYTES = 64 << 10, UPLOAD_BYTES = 64 << 10 };
 
 // answer echoes the method, path and body; /slow sleeps first, /fail fails,
-// /bad-header sets a field value holding a line break and /big answers more
-// than a socket buffer holds.
+// and /bad-header sets a field value holding a line break.
 [[nodiscard]] static Error answer(void *context, Arena *arena, const HttpServerRequest *request,
                                   HttpServerResponse *response, Err *err)
 {
@@ -29,10 +30,12 @@ enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20 };
                                ? (HttpHeader){ S("X-Injected"), S("a\r\nSet-Cookie: b") }
                                : (HttpHeader){ S("Content-Type"), S("text/plain; charset=utf-8") };
     response->header_count = 1;
-    if (str_equal(request->path, S("/big"))) {
-        char *big = arena_push(arena, BIG_BYTES);
-        memset(big, 'x', BIG_BYTES);
-        response->body = (String){ big, BIG_BYTES };
+    // /big answers more than a socket buffer holds, /tls-big more than a TLS record.
+    size_t big_bytes = str_equal(request->path, S("/big")) ? BIG_BYTES : str_equal(request->path, S("/tls-big")) ? TLS_BIG_BYTES : 0;
+    if (big_bytes > 0) {
+        char *big = arena_push(arena, big_bytes);
+        memset(big, 'x', big_bytes);
+        response->body = (String){ big, big_bytes };
         return ERR_OK;
     }
     response->body = str_format(arena, "%.*s %.*s %.*s", (int)request->method.len, request->method.data,
@@ -249,6 +252,120 @@ static void http_server_sends_bodies_larger_than_the_socket_buffer(Test *test)
     http_server_destroy(server);
 }
 
+// Https is a server over TLS with a self-signed certificate for localhost,
+// another such certificate, and files of both a client can trust.
+typedef struct Https {
+    String directory;
+    String ca_file;
+    String other_ca_file;
+    String other_certificate;
+    String other_key;
+    TlsServer *tls;
+    HttpServer *server;
+} Https;
+
+static bool https_start(Test *test, Https *https)
+{
+    String certificate = { 0 };
+    String key = { 0 };
+    Err err = { 0 };
+    *https = (Https){ 0 };
+    HttpServerConfig config = { .address = S("127.0.0.1:0"), .handler = answer, .worker_count = 2 };
+    bool started = dir_create_temp(test->arena, S("libmc-https-"), &https->directory, &err) == ERR_OK &&
+                   tls_self_signed(test->arena, S("localhost"), 1, &certificate, &key, &err) == ERR_OK &&
+                   tls_self_signed(test->arena, S("localhost"), 1, &https->other_certificate, &https->other_key, &err) ==
+                       ERR_OK;
+    if (started) {
+        https->ca_file = path_join(test->arena, https->directory, S("ca.pem"));
+        https->other_ca_file = path_join(test->arena, https->directory, S("other-ca.pem"));
+        started = file_write_all(https->ca_file, certificate, 0600, &err) == ERR_OK &&
+                  file_write_all(https->other_ca_file, https->other_certificate, 0600, &err) == ERR_OK &&
+                  tls_server_create(&(TlsServerConfig){ .certificate_pem = certificate, .key_pem = key }, &https->tls,
+                                    &err) == ERR_OK;
+    }
+    config.tls = https->tls;
+    started = started && http_server_create(&config, &https->server, &err) == ERR_OK;
+    test_check(test, started, err.msg);
+    return started;
+}
+
+static void https_stop(Https *https)
+{
+    if (https->server != nullptr) {
+        http_server_destroy(https->server);
+    }
+    if (https->tls != nullptr) {
+        tls_server_destroy(https->tls);
+    }
+    if (https->directory.len > 0) {
+        unused(dir_remove_all(https->directory, nullptr));
+    }
+}
+
+// https_client trusts ca_file. Each handshake costs much under the
+// sanitizers, so a test keeps one client, whose connection is reused.
+[[nodiscard]] static Error https_client(String ca_file, HttpClient **client, Err *err)
+{
+    static const String LOCALHOST[] = { { "localhost", 9 } };
+    HttpClientConfig config = {
+        .ca_file = ca_file,
+        .allowed_hosts = LOCALHOST,
+        .allowed_host_count = countof(LOCALHOST),
+        .allow_plain_http = true,
+        .max_response_bytes = BIG_BYTES + 256,
+    };
+    return http_client_create(&config, client, err);
+}
+
+// http_server_serves_https makes its certificates once, does three
+// handshakes and moves a few TLS records each way, as gcc's sanitized
+// cryptography is slow.
+static void http_server_serves_https(Test *test)
+{
+    Https https;
+    if (!https_start(test, &https)) {
+        https_stop(&https);
+        return;
+    }
+    uint16_t port = http_server_port(https.server);
+    char *upload = arena_push(test->arena, UPLOAD_BYTES);
+    memset(upload, 'u', UPLOAD_BYTES);
+    HttpRequest big = { .url = str_format(test->arena, "https://localhost:%u/tls-big", port) };
+    HttpRequest post = {
+        .method = S("POST"),
+        .url = str_format(test->arena, "https://localhost:%u/up", port),
+        .body = (String){ upload, UPLOAD_BYTES },
+    };
+    HttpRequest plain = { .url = str_format(test->arena, "http://localhost:%u/", port) };
+    HttpResponse response = { 0 };
+    HttpClient *client = nullptr;
+    HttpClient *other = nullptr;
+    Err err = { 0 };
+    test_check(test, https_client(https.ca_file, &client, &err) == ERR_OK, err.msg);
+    test_check(test, https_client(https.other_ca_file, &other, &err) == ERR_OK, err.msg);
+    if (client != nullptr && other != nullptr) {
+        test_check(test, http_send(client, test->arena, &big, &response, &err) == ERR_OK, err.msg);
+        test_check(test, response.body.len == TLS_BIG_BYTES, "more than a TLS record comes back");
+        test_check(test, http_send(client, test->arena, &post, &response, &err) == ERR_OK, err.msg);
+        test_check(test, response.body.len == S("POST /up ").len + UPLOAD_BYTES, "a large upload is read");
+        test_check(test, http_send(client, test->arena, &plain, &response, nullptr) == ERR_NETWORK,
+                   "plain HTTP to the TLS port fails");
+        test_check(test, http_send(other, test->arena, &big, &response, nullptr) == ERR_NETWORK,
+                   "a client trusting only the other certificate is refused");
+        test_check(test, tls_server_set_certificate(https.tls, https.other_certificate, https.other_key, &err) == ERR_OK,
+                   err.msg);
+        test_check(test, http_send(other, test->arena, &post, &response, &err) == ERR_OK, err.msg);
+        test_check(test, response.status == 200, "after swapping the certificate, the next handshake presents it");
+    }
+    if (client != nullptr) {
+        http_client_destroy(client);
+    }
+    if (other != nullptr) {
+        http_client_destroy(other);
+    }
+    https_stop(&https);
+}
+
 typedef struct SlowGet {
     Arena *arena;
     uint16_t port;
@@ -291,6 +408,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_runs_slow_handlers_aside", http_server_runs_slow_handlers_aside },
     { "http_server_sends_bodies_larger_than_the_socket_buffer", http_server_sends_bodies_larger_than_the_socket_buffer },
     { "http_server_closes_idle_clients", http_server_closes_idle_clients },
+    { "http_server_serves_https", http_server_serves_https },
     { "http_server_finishes_requests_when_stopped", http_server_finishes_requests_when_stopped },
     { nullptr, nullptr },
 };

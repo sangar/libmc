@@ -7,6 +7,7 @@
 #include "mc/platform/platform.h"
 #include "mc/platform/poll.h"
 #include "http1.h"
+#include "tls_session.h"
 
 enum { RECEIVE_BUFFER_BYTES = 16384, MAX_READY = 64, MAX_SWEEP_MS = 1000, NS_PER_MS = 1000000 };
 
@@ -25,6 +26,7 @@ typedef struct Connection {
     Loop *loop;
     Http1 *http;
     int fd;
+    TlsSession *tls; // nullptr on a plain connection
     PollInterest interest;
     char *input;
     String pending; // received and not yet parsed, in input
@@ -89,6 +91,9 @@ static void connection_close(Connection *connection)
     Loop *loop = connection->loop;
     if (connection->interest != POLL_NONE) {
         unused(poller_watch(loop->poller, connection->fd, POLL_NONE, connection, nullptr));
+    }
+    if (connection->tls != nullptr) {
+        tls_session_destroy(connection->tls);
     }
     net_close(connection->fd);
     connection->closed = true;
@@ -163,20 +168,54 @@ static void start_exchange(Connection *connection)
     threadpool_submit(connection->loop->server->workers, &exchange->task);
 }
 
+// socket_result reads a plain socket's result as TLS reports one, which may
+// also wait on the other direction while it handshakes.
+static TlsResult socket_result(NetResult result, TlsResult would_block)
+{
+    switch (result) {
+    case NET_DONE:
+        return TLS_DONE;
+    case NET_WOULD_BLOCK:
+        return would_block;
+    case NET_CLOSED:
+        break;
+    }
+    return TLS_CLOSED;
+}
+
+static TlsResult connection_send(Connection *connection, size_t *sent)
+{
+    if (connection->tls != nullptr) {
+        return tls_try_send(connection->tls, connection->output, sent);
+    }
+    return socket_result(net_try_send(connection->fd, connection->output, sent), TLS_WANT_WRITE);
+}
+
+static TlsResult connection_receive(Connection *connection, size_t *got)
+{
+    if (connection->tls != nullptr) {
+        return tls_try_receive(connection->tls, connection->input, RECEIVE_BUFFER_BYTES, got);
+    }
+    return socket_result(net_try_receive(connection->fd, connection->input, RECEIVE_BUFFER_BYTES, got), TLS_WANT_READ);
+}
+
 // send_output reports whether to try again: it sent some, and did not have to
 // wait or close.
 static bool send_output(Connection *connection)
 {
     size_t sent = 0;
-    switch (net_try_send(connection->fd, connection->output, &sent)) {
-    case NET_DONE:
+    switch (connection_send(connection, &sent)) {
+    case TLS_DONE:
         connection->output = str_slice(connection->output, sent, connection->output.len);
         connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
         return true;
-    case NET_WOULD_BLOCK:
+    case TLS_WANT_READ:
+        connection_watch(connection, POLL_READ);
+        return false;
+    case TLS_WANT_WRITE:
         connection_watch(connection, POLL_WRITE);
         return false;
-    case NET_CLOSED:
+    case TLS_CLOSED:
         connection_close(connection);
         return false;
     }
@@ -188,14 +227,17 @@ static bool send_output(Connection *connection)
 static bool receive_input(Connection *connection)
 {
     size_t got = 0;
-    switch (net_try_receive(connection->fd, connection->input, RECEIVE_BUFFER_BYTES, &got)) {
-    case NET_DONE:
+    switch (connection_receive(connection, &got)) {
+    case TLS_DONE:
         connection->pending = (String){ connection->input, got };
         return true;
-    case NET_WOULD_BLOCK:
+    case TLS_WANT_READ:
         connection_watch(connection, POLL_READ);
         return false;
-    case NET_CLOSED:
+    case TLS_WANT_WRITE:
+        connection_watch(connection, POLL_WRITE);
+        return false;
+    case TLS_CLOSED:
         connection->peer_closed = true;
         return true;
     }
@@ -255,6 +297,7 @@ static void connection_open(Loop *loop, int fd)
         .loop = loop,
         .http = http1_create(loop->server->config.limits),
         .fd = fd,
+        .tls = loop->server->config.tls != nullptr ? tls_session_create(arena, loop->server->config.tls, fd) : nullptr,
         .input = arena_push(arena, RECEIVE_BUFFER_BYTES),
         .deadline_ns = clock_monotonic_ns() + timeout_ns(loop),
         .next = loop->connections,

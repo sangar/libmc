@@ -4,14 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "mbedtls/ssl.h"
-#include "mbedtls/x509_crt.h"
 #include "nghttp2/nghttp2.h"
-#include "psa/crypto.h"
 
 #include "mc/net/ftp.h"
 #include "mc/net/http.h"
 #include "mc/net/smtp.h"
+#include "mc/net/tls.h"
 #include "mc/platform/platform.h"
 #include "mc/text/path.h"
 
@@ -32,33 +30,20 @@ enum { ACCEPT_POLL_MS = 50, REQUEST_LIMIT = 64 * 1024, SLOW_ROUTE_MS = 1000 };
 // Connection is one accepted socket, read and written in the clear or through TLS.
 typedef struct Connection {
     int fd;
-    mbedtls_ssl_context *tls;
+    TlsConnection *tls;
 } Connection;
 
 static int connection_receive(Connection *connection, char *buffer, size_t capacity)
 {
-    if (connection->tls != nullptr) {
-        int got = mbedtls_ssl_read(connection->tls, (unsigned char *)buffer, capacity);
-        return got < 0 ? 0 : got;
-    }
     size_t got = 0;
-    return net_receive(connection->fd, buffer, capacity, &got, nullptr) == ERR_OK ? (int)got : 0;
+    Error e = connection->tls != nullptr ? tls_read(connection->tls, buffer, capacity, &got, nullptr)
+                                         : net_receive(connection->fd, buffer, capacity, &got, nullptr);
+    return e == ERR_OK ? (int)got : 0;
 }
 
 static void connection_send(Connection *connection, String data)
 {
-    if (connection->tls == nullptr) {
-        (void)net_send(connection->fd, data, nullptr);
-        return;
-    }
-    size_t sent = 0;
-    while (sent < data.len) {
-        int wrote = mbedtls_ssl_write(connection->tls, (const unsigned char *)data.data + sent, data.len - sent);
-        if (wrote <= 0) {
-            return;
-        }
-        sent += (size_t)wrote;
-    }
+    unused(connection->tls != nullptr ? tls_write(connection->tls, data, nullptr) : net_send(connection->fd, data, nullptr));
 }
 
 // read_request reads the head and a Content-Length body, and returns them as one text.
@@ -166,15 +151,6 @@ static String route(Arena *arena, String request)
     return answer(arena, 404, "", S("no such route"));
 }
 
-// TlsServer shares mbedTLS's process-wide crypto state with libcurl, which frees it, keys and all, when the
-// last HttpClient is destroyed. pin is an HttpClient that keeps it alive until the server is destroyed.
-typedef struct TlsServer {
-    mbedtls_ssl_config config;
-    mbedtls_x509_crt certificate;
-    mbedtls_pk_context key;
-    HttpClient *pin;
-} TlsServer;
-
 // SmtpServer takes one mail session at a time: over TLS from the start when
 // implicit_tls, else in the clear, offering STARTTLS when starttls. It keeps
 // what it received in arena, for a test to read once server_stop has joined it.
@@ -215,23 +191,6 @@ typedef struct Server {
     atomic_bool stopping;
     Thread thread;
 } Server;
-
-static int tls_send(void *context, const unsigned char *data, size_t length)
-{
-    Connection *connection = context;
-    return net_send(connection->fd, (String){ (const char *)data, length }, nullptr) == ERR_OK ? (int)length
-                                                                                                : MBEDTLS_ERR_SSL_INTERNAL_ERROR;
-}
-
-static int tls_receive(void *context, unsigned char *buffer, size_t capacity)
-{
-    Connection *connection = context;
-    size_t got = 0;
-    if (net_receive(connection->fd, buffer, capacity, &got, nullptr) != ERR_OK) {
-        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
-    }
-    return (int)got;
-}
 
 // Http2Connection answers each HTTP/2 request on a connection with HTTP2_BODY.
 typedef struct Http2Connection {
@@ -305,25 +264,16 @@ static void serve_http2(Connection *connection)
     nghttp2_session_del(session);
 }
 
-// tls_accept runs the server's side of a TLS handshake; the connection then reads and writes through tls.
-static bool tls_accept(TlsServer *server_tls, Connection *connection, mbedtls_ssl_context *tls)
+// start_tls runs the server's side of a TLS handshake; the connection then reads and writes through it.
+static bool start_tls(TlsServer *tls, Connection *connection)
 {
-    mbedtls_ssl_init(tls);
-    bool ready = mbedtls_ssl_setup(tls, &server_tls->config) == 0;
-    mbedtls_ssl_set_bio(tls, connection, tls_send, tls_receive, nullptr);
-    if (!ready || mbedtls_ssl_handshake(tls) != 0) {
-        mbedtls_ssl_free(tls);
-        return false;
-    }
-    connection->tls = tls;
-    return true;
+    return tls_accept(tls, connection->fd, &connection->tls, nullptr) == ERR_OK;
 }
 
-static void tls_end(Connection *connection)
+static void end_tls(Connection *connection)
 {
     if (connection->tls != nullptr) {
-        mbedtls_ssl_close_notify(connection->tls);
-        mbedtls_ssl_free(connection->tls);
+        tls_close(connection->tls);
         connection->tls = nullptr;
     }
 }
@@ -332,15 +282,13 @@ static void serve(Server *server, int client)
 {
     Arena *arena = arena_create(0);
     Connection connection = { .fd = client };
-    mbedtls_ssl_context tls;
-    bool ready = server->tls == nullptr || tls_accept(server->tls, &connection, &tls);
-    const char *protocol = connection.tls != nullptr ? mbedtls_ssl_get_alpn_protocol(&tls) : nullptr;
-    if (ready && protocol != nullptr && strcmp(protocol, "h2") == 0) {
+    bool ready = server->tls == nullptr || start_tls(server->tls, &connection);
+    if (ready && connection.tls != nullptr && str_equal(tls_protocol(connection.tls), S("h2"))) {
         serve_http2(&connection);
     } else if (ready) {
         connection_send(&connection, route(arena, read_request(arena, &connection)));
     }
-    tls_end(&connection);
+    end_tls(&connection);
     net_close(client);
     arena_destroy(arena);
 }
@@ -397,9 +345,8 @@ static void serve_smtp(Server *server, int client)
     SmtpServer *smtp = server->smtp;
     Arena *arena = smtp->arena;
     Connection connection = { .fd = client };
-    mbedtls_ssl_context tls;
     LineReader reader = { .connection = &connection };
-    bool ready = !smtp->implicit_tls || tls_accept(server->tls, &connection, &tls);
+    bool ready = !smtp->implicit_tls || start_tls(server->tls, &connection);
     if (ready) {
         reply(&connection, "220 libmc-test ESMTP\r\n");
     }
@@ -416,7 +363,7 @@ static void serve_smtp(Server *server, int client)
             reply(&connection, "250 8BITMIME\r\n");
         } else if (str_equal(line, S("STARTTLS")) && !secure && smtp->starttls) {
             reply(&connection, "220 2.0.0 ready\r\n");
-            ready = tls_accept(server->tls, &connection, &tls);
+            ready = start_tls(server->tls, &connection);
             reader.start = reader.end = 0;
         } else if (str_starts_with(line, S("AUTH PLAIN")) && secure) {
             smtp->auth = str_trim(str_trim_prefix(line, S("AUTH PLAIN")));
@@ -447,7 +394,7 @@ static void serve_smtp(Server *server, int client)
             reply(&connection, "502 5.5.2 not implemented\r\n");
         }
     }
-    tls_end(&connection);
+    end_tls(&connection);
     net_close(client);
 }
 
@@ -517,7 +464,7 @@ static void ftp_listen(FtpSession *session)
 }
 
 // ftp_open_data accepts the client's connection to the passive port, through TLS after PROT P.
-static bool ftp_open_data(FtpSession *session, Connection *data, mbedtls_ssl_context *tls)
+static bool ftp_open_data(FtpSession *session, Connection *data)
 {
     *data = (Connection){ .fd = -1 };
     if (session->passive < 0 || !net_accept(session->passive, 5000, &data->fd)) {
@@ -525,7 +472,7 @@ static bool ftp_open_data(FtpSession *session, Connection *data, mbedtls_ssl_con
     }
     (void)net_set_timeouts(data->fd, 5000, nullptr);
     session->ftp->data_in_clear |= !session->protect;
-    return !session->protect || tls_accept(session->server->tls, data, tls);
+    return !session->protect || start_tls(session->server->tls, data);
 }
 
 // ftp_close_data waits for the client's close_notify after sending its own,
@@ -533,14 +480,12 @@ static bool ftp_open_data(FtpSession *session, Connection *data, mbedtls_ssl_con
 // reset, as it is when the server closes before that close_notify arrives.
 static void ftp_close_data(FtpSession *session, Connection *data)
 {
-    if (data->tls != nullptr) {
-        mbedtls_ssl_close_notify(data->tls);
+    if (data->tls != nullptr && tls_shutdown(data->tls, nullptr) == ERR_OK) {
         char rest[256];
         while (connection_receive(data, rest, sizeof rest) > 0) {
         }
-        mbedtls_ssl_free(data->tls);
-        data->tls = nullptr;
     }
+    end_tls(data);
     if (data->fd >= 0) {
         net_close(data->fd);
     }
@@ -557,8 +502,7 @@ static void ftp_send_file(FtpSession *session, String path)
     }
     reply(&session->control, "150 sending\r\n");
     Connection data;
-    mbedtls_ssl_context tls;
-    if (ftp_open_data(session, &data, &tls)) {
+    if (ftp_open_data(session, &data)) {
         if (str_contains(path, S("slow"))) {
             clock_sleep_ms(SLOW_ROUTE_MS);
         }
@@ -572,9 +516,8 @@ static void ftp_receive_file(FtpSession *session, String path)
 {
     reply(&session->control, "150 receiving\r\n");
     Connection data;
-    mbedtls_ssl_context tls;
     StringBuilder contents = str_builder_create(session->ftp->arena, 256);
-    if (ftp_open_data(session, &data, &tls)) {
+    if (ftp_open_data(session, &data)) {
         char buffer[4096];
         int got = 0;
         while ((got = connection_receive(&data, buffer, sizeof buffer)) > 0) {
@@ -592,8 +535,7 @@ static void ftp_send_names(FtpSession *session)
     FtpServer *ftp = session->ftp;
     reply(&session->control, "150 listing\r\n");
     Connection data;
-    mbedtls_ssl_context tls;
-    if (ftp_open_data(session, &data, &tls)) {
+    if (ftp_open_data(session, &data)) {
         for (size_t i = 0; i < ftp->paths.count; i++) {
             String path = ftp->paths.items[i];
             size_t slash = 0;
@@ -609,7 +551,7 @@ static void ftp_send_names(FtpSession *session)
 }
 
 // ftp_answer answers one command and reports whether the session goes on.
-static bool ftp_answer(FtpSession *session, mbedtls_ssl_context *tls, String command, String argument)
+static bool ftp_answer(FtpSession *session, String command, String argument)
 {
     FtpServer *ftp = session->ftp;
     Connection *control = &session->control;
@@ -618,7 +560,7 @@ static bool ftp_answer(FtpSession *session, mbedtls_ssl_context *tls, String com
     if (str_equal(command, S("AUTH")) && ftp->auth_tls && !secure) {
         reply(control, "234 go ahead\r\n");
         session->reader.start = session->reader.end = 0;
-        return tls_accept(session->server->tls, control, tls);
+        return start_tls(session->server->tls, control);
     }
     if (str_equal(command, S("USER"))) {
         ftp->user = argument;
@@ -666,9 +608,8 @@ static void serve_ftp(Server *server, int client)
     FtpServer *ftp = server->ftp;
     FtpSession session = { .server = server, .ftp = ftp, .control = { .fd = client }, .passive = -1 };
     session.reader.connection = &session.control;
-    mbedtls_ssl_context tls;
     ftp->sessions++;
-    bool ready = !ftp->implicit_tls || tls_accept(server->tls, &session.control, &tls);
+    bool ready = !ftp->implicit_tls || start_tls(server->tls, &session.control);
     if (ready) {
         reply(&session.control, "220 libmc-test FTP\r\n");
     }
@@ -677,12 +618,12 @@ static void serve_ftp(Server *server, int client)
         String command = { 0 };
         String argument = { 0 };
         str_cut(line, ' ', &command, &argument);
-        ready = ftp_answer(&session, &tls, command, argument);
+        ready = ftp_answer(&session, command, argument);
     }
     if (session.passive >= 0) {
         net_close(session.passive);
     }
-    tls_end(&session.control);
+    end_tls(&session.control);
     net_close(client);
 }
 
@@ -705,40 +646,22 @@ static void *accept_loop(void *argument)
     return nullptr;
 }
 
-static const char *const HTTP2_PROTOCOLS[] = { "h2", nullptr };
+static const String HTTP2_PROTOCOLS[] = { { "h2", 2 } };
 
-// tls_server_create loads the server's certificate; with http2 it offers only HTTP/2.
-static bool tls_server_create(Test *test, TlsServer *tls, bool http2)
+// test_tls_server loads the test CA's certificate for the server; with http2 it offers only HTTP/2.
+static TlsServer *test_tls_server(Test *test, bool http2)
 {
-    String certificate = { 0 };
-    String key = { 0 };
-    HttpClientConfig pin = { .ca_file = S(CA_FILE) };
-    tls->pin = nullptr;
-    if (file_read_all(test->arena, S(SERVER_CERT_FILE), &certificate, nullptr) != ERR_OK ||
-        file_read_all(test->arena, S(SERVER_KEY_FILE), &key, nullptr) != ERR_OK ||
-        http_client_create(&pin, &tls->pin, nullptr) != ERR_OK || psa_crypto_init() != PSA_SUCCESS) {
-        return false;
-    }
-    mbedtls_ssl_config_init(&tls->config);
-    mbedtls_x509_crt_init(&tls->certificate);
-    mbedtls_pk_init(&tls->key);
-    // mbedTLS parses PEM including its terminating NUL, which file_read_all writes past the end.
-    return mbedtls_x509_crt_parse(&tls->certificate, (const unsigned char *)certificate.data, certificate.len + 1) == 0 &&
-           mbedtls_pk_parse_key(&tls->key, (const unsigned char *)key.data, key.len + 1, nullptr, 0) == 0 &&
-           mbedtls_ssl_config_defaults(&tls->config, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM,
-                                       MBEDTLS_SSL_PRESET_DEFAULT) == 0 &&
-           mbedtls_ssl_conf_own_cert(&tls->config, &tls->certificate, &tls->key) == 0 &&
-           (!http2 || mbedtls_ssl_conf_alpn_protocols(&tls->config, HTTP2_PROTOCOLS) == 0);
-}
-
-static void tls_server_destroy(TlsServer *tls)
-{
-    mbedtls_ssl_config_free(&tls->config);
-    mbedtls_x509_crt_free(&tls->certificate);
-    mbedtls_pk_free(&tls->key);
-    if (tls->pin != nullptr) {
-        http_client_destroy(tls->pin);
-    }
+    TlsServerConfig config = {
+        .protocols = http2 ? HTTP2_PROTOCOLS : nullptr,
+        .protocol_count = http2 ? countof(HTTP2_PROTOCOLS) : 0,
+    };
+    TlsServer *tls = nullptr;
+    Err err = { 0 };
+    bool loaded = file_read_all(test->arena, S(SERVER_CERT_FILE), &config.certificate_pem, &err) == ERR_OK &&
+                  file_read_all(test->arena, S(SERVER_KEY_FILE), &config.key_pem, &err) == ERR_OK &&
+                  tls_server_create(&config, &tls, &err) == ERR_OK;
+    test_check(test, loaded, err.msg);
+    return tls;
 }
 
 static bool server_listen(Test *test, Server *server)
@@ -911,10 +834,9 @@ static void http_enforces_limits(Test *test)
 
 static void http_verifies_tls_certificates(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     Server server;
-    test_check(test, server_start(test, &server, &tls), "starts the TLS server");
+    test_check(test, server_start(test, &server, tls), "starts the TLS server");
     HttpClient *client = local_client(test, 0, 0);
     HttpResponse response = { 0 };
     Err err = { 0 };
@@ -935,39 +857,41 @@ static void http_verifies_tls_certificates(Test *test)
                "refuses a server whose issuer is not trusted");
     http_client_destroy(client);
     server_stop(&server);
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
 }
 
-// http_leaves_crypto_to_others_in_the_process checks that a key someone
-// else holds in mbedTLS, such as a TLS server, outlives the last HTTP client.
+// http_leaves_crypto_to_others_in_the_process checks that a TLS server,
+// whose key lives in mbedTLS's process-wide store, still serves after the
+// last HTTP client is gone.
 static void http_leaves_crypto_to_others_in_the_process(Test *test)
 {
-    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attributes, 128);
-    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
-    psa_set_key_algorithm(&attributes, PSA_ALG_GCM);
-    mbedtls_svc_key_id_t key = MBEDTLS_SVC_KEY_ID_INIT;
-    test_check(test, psa_crypto_init() == PSA_SUCCESS && psa_generate_key(&attributes, &key) == PSA_SUCCESS,
-               "make a key");
-    HttpClientConfig config = { 0 };
-    HttpClient *client = nullptr;
-    test_check(test, http_client_create(&config, &client, nullptr) == ERR_OK, "create a client");
+    TlsServer *tls = test_tls_server(test, false);
+    HttpClient *client = local_client(test, 0, 0);
     if (client != nullptr) {
         http_client_destroy(client);
     }
-    psa_key_attributes_t found = PSA_KEY_ATTRIBUTES_INIT;
-    test_check(test, psa_get_key_attributes(key, &found) == PSA_SUCCESS, "the key is still there");
-    psa_reset_key_attributes(&found);
-    psa_destroy_key(key);
+    Server server;
+    test_check(test, tls != nullptr && server_start(test, &server, tls), "starts the TLS server");
+    client = local_client(test, 0, 0);
+    HttpRequest request = { .url = local_url(test, &server, "https", "/echo") };
+    HttpResponse response = { 0 };
+    Err err = { 0 };
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK, err.msg);
+    test_check(test, response.status == 200, "the server's key still signs");
+    http_client_destroy(client);
+    server_stop(&server);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
 }
 
 static void http_speaks_http2_when_offered(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, true), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, true);
     Server server;
-    test_check(test, server_start(test, &server, &tls), "starts the HTTP/2 server");
+    test_check(test, server_start(test, &server, tls), "starts the HTTP/2 server");
     HttpClient *client = local_client(test, 0, 0);
     HttpResponse response = { 0 };
     Err err = { 0 };
@@ -977,7 +901,9 @@ static void http_speaks_http2_when_offered(Test *test)
     test_check_str(test, response.body, S(HTTP2_BODY), "reads a response over HTTP/2");
     http_client_destroy(client);
     server_stop(&server);
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
 }
 
 static void http_decodes_compressed_responses(Test *test)
@@ -1155,11 +1081,10 @@ static MailMessage short_message(const MailAddress *to)
 
 static void smtp_sends_mail_with_starttls(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     SmtpServer smtp = { .starttls = true, .arena = arena_create(0) };
     Server server;
-    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    test_check(test, smtp_server_start(test, &server, tls, &smtp), "starts the mail server");
     SmtpConfig config = {
         .url = local_url(test, &server, "smtp", ""),
         .username = S("nora"),
@@ -1209,17 +1134,18 @@ static void smtp_sends_mail_with_starttls(Test *test)
     test_check(test, str_contains(data, S("filename=\"brev.txt\"")) && str_contains(data, S("SGVsbG8sIFBERg==")),
                "an attachment in base64");
     test_check(test, str_contains(data, S("filename*=UTF-8''s%C3%B8knad.pdf")), "a UTF-8 file name");
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
     arena_destroy(smtp.arena);
 }
 
 static void smtp_sends_mail_over_tls_from_the_start(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     SmtpServer smtp = { .implicit_tls = true, .arena = arena_create(0) };
     Server server;
-    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    test_check(test, smtp_server_start(test, &server, tls, &smtp), "starts the mail server");
     SmtpConfig config = { .url = local_url(test, &server, "smtps", ""), .ca_file = S(CA_FILE) };
     const MailAddress to[] = { { .address = S("torvald@example.no") } };
     MailMessage message = short_message(to);
@@ -1227,17 +1153,18 @@ static void smtp_sends_mail_over_tls_from_the_start(Test *test)
     test_check(test, smtp_send(&config, &message, &err) == ERR_OK, err.msg);
     server_stop(&server);
     test_check(test, str_contains(smtp.data, S("Subject: Et dukkehjem\r\n")), "delivers the message");
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
     arena_destroy(smtp.arena);
 }
 
 static void smtp_refuses_servers_without_starttls(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     SmtpServer smtp = { .arena = arena_create(0) };
     Server server;
-    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    test_check(test, smtp_server_start(test, &server, tls, &smtp), "starts the mail server");
     SmtpConfig config = {
         .url = local_url(test, &server, "smtp", ""),
         .username = S("nora"),
@@ -1249,17 +1176,18 @@ static void smtp_refuses_servers_without_starttls(Test *test)
     test_check(test, smtp_send(&config, &message, nullptr) == ERR_NETWORK, "a server that offers no STARTTLS");
     server_stop(&server);
     test_check(test, smtp.auth.len == 0 && smtp.mail_from.len == 0, "sends neither the password nor the mail");
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
     arena_destroy(smtp.arena);
 }
 
 static void smtp_reports_a_refused_recipient(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     SmtpServer smtp = { .starttls = true, .arena = arena_create(0) };
     Server server;
-    test_check(test, smtp_server_start(test, &server, &tls, &smtp), "starts the mail server");
+    test_check(test, smtp_server_start(test, &server, tls, &smtp), "starts the mail server");
     SmtpConfig config = { .url = local_url(test, &server, "smtp", ""), .ca_file = S(CA_FILE) };
     const MailAddress to[] = { { .address = S("refused@example.no") } };
     MailMessage message = short_message(to);
@@ -1267,7 +1195,9 @@ static void smtp_reports_a_refused_recipient(Test *test)
     test_check(test, smtp_send(&config, &message, &err) == ERR_NETWORK, "the server refuses the recipient");
     test_check(test, str_contains(S(err.msg), S("550")), err.msg);
     server_stop(&server);
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
     arena_destroy(smtp.arena);
 }
 
@@ -1311,11 +1241,10 @@ static FtpClient *ftp_client(Test *test, const Server *server, const char *schem
 
 static void ftp_moves_files_over_auth_tls(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     FtpServer ftp = { .auth_tls = true, .arena = arena_create(0) };
     Server server;
-    test_check(test, ftp_server_start(test, &server, &tls, &ftp), "starts the FTP server");
+    test_check(test, ftp_server_start(test, &server, tls, &ftp), "starts the FTP server");
     String dir = { 0 };
     test_check(test, dir_create_temp(test->arena, S("mc-ftp-"), &dir, nullptr) == ERR_OK, "creates a directory");
     String original = path_join(test->arena, dir, S("original"));
@@ -1346,18 +1275,19 @@ static void ftp_moves_files_over_auth_tls(Test *test)
     test_check(test, !ftp.data_in_clear, "moves files over TLS");
     test_check(test, ftp.sessions == 1, "keeps one connection for every call");
     (void)dir_remove_all(dir, nullptr);
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
     arena_destroy(ftp.arena);
 }
 
 static void ftp_downloads_over_tls_from_the_start(Test *test)
 {
-    TlsServer tls;
-    test_check(test, tls_server_create(test, &tls, false), "loads the server certificate");
+    TlsServer *tls = test_tls_server(test, false);
     FtpServer ftp = { .implicit_tls = true, .arena = arena_create(0) };
     ftp_store(&ftp, S("velkommen.txt"), S("Hei"));
     Server server;
-    test_check(test, ftp_server_start(test, &server, &tls, &ftp), "starts the FTP server");
+    test_check(test, ftp_server_start(test, &server, tls, &ftp), "starts the FTP server");
     String dir = { 0 };
     test_check(test, dir_create_temp(test->arena, S("mc-ftp-"), &dir, nullptr) == ERR_OK, "creates a directory");
     String copy = path_join(test->arena, dir, S("velkommen.txt"));
@@ -1373,7 +1303,9 @@ static void ftp_downloads_over_tls_from_the_start(Test *test)
     test_check(test, file_read_all(test->arena, copy, &downloaded, nullptr) == ERR_OK, "reads the download");
     test_check_str(test, downloaded, S("Hei"), "downloads the file");
     (void)dir_remove_all(dir, nullptr);
-    tls_server_destroy(&tls);
+    if (tls != nullptr) {
+        tls_server_destroy(tls);
+    }
     arena_destroy(ftp.arena);
 }
 
