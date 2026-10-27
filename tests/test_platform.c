@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 static void files_round_trip_in_a_temp_dir(Test *test)
 {
@@ -319,6 +320,17 @@ static void threads_share_state_under_a_mutex(Test *test)
     test_check(test, thread_cpu_count() >= 1, "at least one cpu");
     cond_destroy(&shared.cond);
     mutex_destroy(&shared.mutex);
+}
+
+static void random_bytes_differ_each_time(Test *test)
+{
+    uint8_t first[1000] = { 0 };
+    uint8_t second[1000] = { 0 };
+    Err err = { 0 };
+    test_check(test, random_bytes(first, sizeof first, &err) == ERR_OK, err.msg);
+    test_check(test, random_bytes(second, sizeof second, &err) == ERR_OK, err.msg);
+    test_check(test, memcmp(first, second, sizeof first) != 0, "two fills differ");
+    test_check(test, memcmp(first + 900, second + 900, 100) != 0, "past 256 bytes too");
 }
 
 static void clock_moves_forward(Test *test)
@@ -945,6 +957,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "processes_take_signals_and_limits", processes_take_signals_and_limits },
     { "threads_share_state_under_a_mutex", threads_share_state_under_a_mutex },
     { "clock_moves_forward", clock_moves_forward },
+    { "random_bytes_differ_each_time", random_bytes_differ_each_time },
     { "network_rejects_a_bad_address", network_rejects_a_bad_address },
     { "dir_read_describes_each_entry", dir_read_describes_each_entry },
     { "files_map_and_append", files_map_and_append },
