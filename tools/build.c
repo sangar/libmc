@@ -132,7 +132,7 @@ static const char *const CURL_FLAGS[] = {
 // server that answers HTTP/2.
 static const char *const LIBMC_FLAGS[] = {
     "-Iinclude", "-Ideps/cyaml", "-Ideps/utf8proc", "-Ideps/yyjson", "-Ideps/curl/include", "-DCURL_STATICLIB",
-    "-Ideps/cacert", "-Ideps/md4c", "-Ideps/expat/lib", "-Ideps/llhttp/include", MBEDTLS_PUBLIC_FLAGS,
+    "-Ideps/cacert", "-Ideps/md4c", "-Ideps/expat/lib", "-Ideps/llhttp/include", "-Ideps/zlib", MBEDTLS_PUBLIC_FLAGS,
     NGHTTP2_PUBLIC_FLAGS,
 };
 
