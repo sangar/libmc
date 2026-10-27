@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 
 #include "mc/platform/platform.h"
+#include "curl_global.h"
 #include "roots.h"
 
 enum {
@@ -33,12 +34,12 @@ Error ftp_client_create(const FtpClientConfig *config, FtpClient **client, Err *
     if (ca_file.len > 0 && !file_exists(ca_file)) {
         return err_set(err, ERR_NOT_FOUND, "ftp: no bundle of trusted roots at %.*s", (int)ca_file.len, ca_file.data);
     }
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-        return err_set(err, ERR_PLATFORM, "ftp: curl_global_init failed");
+    Error started = curl_global_start("ftp", err);
+    if (started != ERR_OK) {
+        return started;
     }
     CURL *curl = curl_easy_init();
     if (curl == nullptr) {
-        curl_global_cleanup();
         return err_set(err, ERR_OUT_OF_MEMORY, "ftp: curl_easy_init failed");
     }
     Arena *arena = arena_create(0);
@@ -61,7 +62,6 @@ Error ftp_client_create(const FtpClientConfig *config, FtpClient **client, Err *
 void ftp_client_destroy(FtpClient *client)
 {
     curl_easy_cleanup(client->curl);
-    curl_global_cleanup();
     arena_destroy(client->arena);
 }
 
