@@ -48,3 +48,24 @@ typedef struct XmlEvents {
 // document that is not well-formed, or expands past those limits, is
 // ERR_PARSE with the line and column in err.
 [[nodiscard]] Error xml_parse(Arena *arena, String text, XmlEvents *events, Err *err);
+
+// XmlWriter builds a UTF-8 document in an arena, for answers to APIs that
+// speak XML. Names are written as given and must be XML names; text and
+// attribute values are escaped and must be UTF-8 without the control
+// characters XML 1.0 forbids. Each start needs its end.
+typedef struct XmlWriter {
+    StringBuilder out;
+} XmlWriter;
+
+// xml_writer_create starts a document with its declaration.
+XmlWriter xml_writer_create(Arena *arena);
+void xml_writer_start(XmlWriter *xml, String name, const XmlAttribute *attributes, size_t attribute_count);
+void xml_writer_end(XmlWriter *xml, String name);
+void xml_writer_text(XmlWriter *xml, String text);
+// xml_writer_element writes name holding text, with no attributes.
+void xml_writer_element(XmlWriter *xml, String name, String text);
+String xml_writer_finish(XmlWriter *xml);
+
+// xml_escape_into appends text with &, <, >, " and ' written as references,
+// which suits both text and attribute values, in XML and in HTML.
+void xml_escape_into(StringBuilder *out, String text);
