@@ -6,6 +6,7 @@
 #include "mc/encoding/csv.h"
 #include "mc/encoding/base64.h"
 #include "mc/encoding/dotenv.h"
+#include "mc/encoding/gzip.h"
 #include "mc/encoding/json.h"
 #include "mc/encoding/markdown.h"
 #include "mc/encoding/xml.h"
@@ -330,6 +331,41 @@ static void base64_refuses_malformed_text(Test *test)
     }
 }
 
+static void gzip_round_trips_with_and_without_a_comment(Test *test)
+{
+    String text = str_repeat(test->arena, S("blåbær og bringebær, "), 200);
+    String plain = { 0 };
+    String commented = { 0 };
+    String back = { 0 };
+    Err err = { 0 };
+    GzipOptions comment = { .comment = S("padding") };
+    test_check(test, gzip_compress(test->arena, text, nullptr, &plain, &err) == ERR_OK, err.msg);
+    test_check(test, plain.len > 2 && (uint8_t)plain.data[0] == 0x1f && (uint8_t)plain.data[1] == 0x8b,
+               "gzip's magic number");
+    test_check(test, plain.len < text.len / 10, "repetitive text shrinks");
+    test_check(test, gzip_decompress(test->arena, plain, text.len, &back, &err) == ERR_OK, err.msg);
+    test_check_str(test, back, text, "the text comes back");
+    test_check(test, gzip_compress(test->arena, text, &comment, &commented, &err) == ERR_OK, err.msg);
+    test_check(test, commented.len == plain.len + S("padding").len + 1, "the comment and its NUL are in the header");
+    test_check(test, gzip_decompress(test->arena, commented, text.len, &back, &err) == ERR_OK, err.msg);
+    test_check_str(test, back, text, "the commented text comes back");
+}
+
+static void gzip_refuses_malformed_and_oversized_data(Test *test)
+{
+    String text = str_repeat(test->arena, S("a"), 10000);
+    String compressed = { 0 };
+    String back = { 0 };
+    test_check(test, gzip_compress(test->arena, text, nullptr, &compressed, nullptr) == ERR_OK, "compress");
+    test_check(test, gzip_decompress(test->arena, S("not gzip at all"), 100, &back, nullptr) == ERR_PARSE,
+               "not gzip");
+    test_check(test, gzip_decompress(test->arena, str_slice(compressed, 0, compressed.len - 4), text.len, &back,
+                                     nullptr) == ERR_PARSE,
+               "a truncated stream");
+    test_check(test, gzip_decompress(test->arena, compressed, text.len - 1, &back, nullptr) == ERR_UNSUPPORTED,
+               "more than max_bytes");
+}
+
 static void dotenv_reads_names_and_values(Test *test)
 {
     static const char TEXT[] = "# settings\n"
@@ -608,6 +644,8 @@ static void xml_rejects_malformed_and_hostile_documents(Test *test)
 const TestCase ENCODING_TESTS[] = {
     { "base64_round_trips_the_rfc_4648_examples", base64_round_trips_the_rfc_4648_examples },
     { "base64_refuses_malformed_text", base64_refuses_malformed_text },
+    { "gzip_round_trips_with_and_without_a_comment", gzip_round_trips_with_and_without_a_comment },
+    { "gzip_refuses_malformed_and_oversized_data", gzip_refuses_malformed_and_oversized_data },
     { "json_parses_every_kind", json_parses_every_kind },
     { "json_decodes_strings", json_decodes_strings },
     { "json_rejects_malformed_input", json_rejects_malformed_input },
