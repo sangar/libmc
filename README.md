@@ -137,7 +137,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/container/hash.h` | FNV-1a hashing |
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
 | crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
-| | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing |
+| | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing, and the signing key it derives |
 | platform | `mc/platform/platform.h` | Clock, secure random bytes, locale-independent floats, threads, files and mappings, reading a descriptor to its end, directories with metadata, advisory file locks, a search for a file up through parent directories, a private per-user runtime directory, processes (also detached into a session of their own), environment, signals and a thread that watches for them, TCP and Unix sockets, non-blocking accepts, sends and receives, and socket pairs for driving a server in-process |
 | | `mc/platform/frame.h` | Length-prefixed frames of a header and a body on a stream socket |
 | | `mc/platform/poll.h` | An event loop's wait on many sockets, on kqueue and epoll, with a wake from other threads; the `net_try_*` calls move bytes without waiting |
@@ -168,6 +168,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/net/tls.h` | TLS for servers on mbedTLS: TLS 1.2 and 1.3 with the protocols ALPN offers, h2 and http/1.1 unless told, the certificate swapped while serving for renewals, connections over blocking sockets for servers that read and write in turn and for STARTTLS, and self-signed certificates for development |
 | | `mc/net/acme.h` | Certificates from Let's Encrypt or another ACME CA: HTTP-01 answered on port 80, which otherwise redirects to https, or TLS-ALPN-01 on port 443; account and certificate kept in a storage directory shared by processes, and renewed in the background two thirds into the certificate's lifetime |
 | | `mc/net/s3.h` | S3 and the stores that speak its API: objects in memory or files, multipart uploads, metadata, paged listing, retries with backoff, credentials found as the AWS tools find them; thread-safe, with pooled connections |
+| | `mc/net/sigv4_verify.h` | AWS Signature Version 4 checked as an S3-compatible server does: the Authorization header or a presigned query, clock skew and expiry, the payload hash mode, and each aws-chunked chunk's signature |
 | | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |

@@ -26,5 +26,8 @@ typedef struct SigV4Credentials {
 // sigv4_authorization returns the value of the Authorization header.
 String sigv4_authorization(Arena *arena, SigV4Request request, SigV4Credentials credentials);
 String sigv4_payload_hash(Arena *arena, String payload);
+// sigv4_signing_key derives the key that signs for a day, as YYYYMMDD, region
+// and service, as raw bytes.
+String sigv4_signing_key(Arena *arena, String secret_key, String date, String region, String service);
 // sigv4_date writes a Unix time the way X-Amz-Date wants it: 20150830T123600Z.
 String sigv4_date(Arena *arena, int64_t unix_seconds);
