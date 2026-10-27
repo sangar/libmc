@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -112,6 +113,20 @@ int64_t clock_wall_ns(void)
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
     return (int64_t)now.tv_sec * NS_PER_SECOND + now.tv_nsec;
+}
+
+Error random_bytes(void *buffer, size_t len, Err *err)
+{
+    unsigned char *bytes = buffer;
+    // getentropy gives at most 256 bytes a call.
+    for (size_t done = 0; done < len;) {
+        size_t chunk = len - done < 256 ? len - done : 256;
+        if (getentropy(bytes + done, chunk) != 0) {
+            return err_set(err, ERR_PLATFORM, "getentropy: %s", strerror(errno));
+        }
+        done += chunk;
+    }
+    return ERR_OK;
 }
 
 void clock_sleep_ms(int64_t milliseconds)
