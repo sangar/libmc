@@ -12,6 +12,8 @@
 #include "mc/container/sort.h"
 #include "mc/text/utf8.h"
 
+#include <string.h>
+
 static void utf8_roundtrip_and_validation(Test *test)
 {
     char encoded[UTF8_MAX_BYTES];
@@ -256,11 +258,14 @@ static void md5_known_vectors(Test *test)
     test_check_str(test, hex_encode(test->arena, digest, MD5_LEN), S("d41d8cd98f00b204e9800998ecf8427e"), "empty input");
     md5(S("abc"), digest);
     test_check_str(test, hex_encode(test->arena, digest, MD5_LEN), S("900150983cd24fb0d6963f7d28e17f72"), "abc");
+    // memset, as str_repeat takes seconds for a million bytes under the sanitizers on slow runners.
+    size_t million = 1000000;
+    char *a = arena_push(test->arena, million);
+    memset(a, 'a', million);
     Md5 hash;
     md5_init(&hash);
-    String million = str_repeat(test->arena, S("a"), 1000000);
-    for (size_t at = 0; at < million.len; at += 997) {
-        md5_update(&hash, million.data + at, min_size(997, million.len - at));
+    for (size_t at = 0; at < million; at += 997) {
+        md5_update(&hash, a + at, min_size(997, million - at));
     }
     md5_final(&hash, digest);
     test_check_str(test, hex_encode(test->arena, digest, MD5_LEN), S("7707d6ae4e027c70eea2a935c2296f21"),
