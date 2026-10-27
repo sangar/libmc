@@ -3,6 +3,7 @@
 #include "mc/text/path.h"
 #include "mc/platform/frame.h"
 #include "mc/platform/platform.h"
+#include "mc/platform/poll.h"
 #include "mc/platform/terminal.h"
 
 #include <signal.h>
@@ -507,6 +508,115 @@ static void socket_pairs_carry_bytes_without_waiting(Test *test)
     net_close(fds[1]);
 }
 
+static void sockets_move_bytes_without_waiting(Test *test)
+{
+    Err err = { 0 };
+    int listener;
+    test_check(test, net_listen(S("127.0.0.1:0"), &listener, &err) == ERR_OK, "listen");
+    test_check(test, net_set_nonblocking(listener, &err) == ERR_OK, "make the listener non-blocking");
+    int server = -1;
+    test_check(test, !net_try_accept(listener, &server), "nobody is waiting");
+    String address = S("");
+    size_t colon = 0;
+    test_check(test, net_local_address(test->arena, listener, &address, &err) == ERR_OK &&
+                         str_find_last_char(address, ':', &colon),
+               "ask where it listens");
+    int client = -1;
+    test_check(test, net_connect(S("127.0.0.1"), str_slice(address, colon + 1, address.len), 1000, &client, &err) == ERR_OK,
+               "connect");
+    bool accepted = false;
+    for (int i = 0; i < 100 && !accepted; i++) {
+        accepted = net_try_accept(listener, &server);
+        clock_sleep_ms(accepted ? 0 : 10);
+    }
+    test_check(test, accepted, "accept the waiting connection");
+
+    char buffer[32];
+    size_t got = 99;
+    test_check(test, net_try_receive(server, buffer, sizeof buffer, &got) == NET_WOULD_BLOCK && got == 0,
+               "nothing has arrived");
+    size_t sent = 0;
+    test_check(test, net_try_send(client, S("blåbær"), &sent) == NET_DONE && sent == S("blåbær").len, "send");
+    size_t len = 0;
+    for (int i = 0; i < 100 && len < sent; i++) {
+        if (net_try_receive(server, buffer + len, sizeof buffer - len, &got) == NET_DONE) {
+            len += got;
+        } else {
+            clock_sleep_ms(10);
+        }
+    }
+    test_check_str(test, (String){ buffer, len }, S("blåbær"), "the bytes arrive");
+    net_close(client);
+    NetResult result = NET_WOULD_BLOCK;
+    for (int i = 0; i < 100 && result == NET_WOULD_BLOCK; i++) {
+        result = net_try_receive(server, buffer, sizeof buffer, &got);
+        clock_sleep_ms(result == NET_WOULD_BLOCK ? 10 : 0);
+    }
+    test_check(test, result == NET_CLOSED, "a closed peer reads as closed");
+    NetResult send_result = NET_DONE;
+    // The first send after the close succeeds; the peer's reset fails a later one.
+    for (int i = 0; i < 100 && send_result == NET_DONE; i++) {
+        send_result = net_try_send(server, S("data"), &sent);
+        clock_sleep_ms(send_result == NET_DONE ? 10 : 0);
+    }
+    test_check(test, send_result == NET_CLOSED, "sending to a closed peer fails without SIGPIPE");
+    net_close(server);
+    net_close(listener);
+}
+
+static void poller_reports_ready_sockets(Test *test)
+{
+    Err err = { 0 };
+    Poller *poller = nullptr;
+    test_check(test, poller_create(&poller, &err) == ERR_OK, "create a poller");
+    int fds[2];
+    test_check(test, net_pair(fds, &err) == ERR_OK, "create a pair");
+    int reader_data = 0;
+    int writer_data = 0;
+    void *ready[4];
+    test_check(test, poller_watch(poller, fds[1], POLL_READ, &reader_data, &err) == ERR_OK, "watch for reading");
+    test_check(test, poller_wait(poller, ready, countof(ready), 0) == 0, "nothing to read yet");
+    test_check(test, net_send(fds[0], S("æøå"), &err) == ERR_OK, "send");
+    test_check(test, poller_wait(poller, ready, countof(ready), 1000) == 1 && ready[0] == &reader_data,
+               "the reader is ready");
+    test_check(test, poller_wait(poller, ready, countof(ready), 0) == 1, "and stays ready until read");
+    test_check(test, poller_watch(poller, fds[1], POLL_NONE, &reader_data, &err) == ERR_OK, "stop watching");
+    test_check(test, poller_wait(poller, ready, countof(ready), 50) == 0, "unwatched data is not reported");
+    test_check(test, poller_watch(poller, fds[0], POLL_WRITE, &writer_data, &err) == ERR_OK, "watch for writing");
+    test_check(test, poller_wait(poller, ready, countof(ready), 1000) == 1 && ready[0] == &writer_data,
+               "the writer is ready");
+    net_close(fds[0]);
+    net_close(fds[1]);
+    poller_destroy(poller);
+}
+
+static void *wake_later(void *argument)
+{
+    clock_sleep_ms(50);
+    poller_wake(argument);
+    return nullptr;
+}
+
+static void poller_wakes_from_another_thread(Test *test)
+{
+    Err err = { 0 };
+    Poller *poller = nullptr;
+    test_check(test, poller_create(&poller, &err) == ERR_OK, "create a poller");
+    void *ready[4];
+    poller_wake(poller);
+    test_check(test, poller_wait(poller, ready, countof(ready), 1000) == 1 && ready[0] == nullptr,
+               "a wake before the wait is kept");
+    test_check(test, poller_wait(poller, ready, countof(ready), 0) == 0, "and taken once");
+    Thread thread;
+    test_check(test, thread_start(&thread, wake_later, poller, &err) == ERR_OK, "start a waker");
+    int64_t start = clock_monotonic_ns();
+    size_t count = poller_wait(poller, ready, countof(ready), 5000);
+    int64_t elapsed_ms = (clock_monotonic_ns() - start) / 1000000;
+    test_check(test, count == 1 && ready[0] == nullptr && elapsed_ms < 4000, "another thread wakes the wait");
+    thread_join(&thread);
+    poller_destroy(poller);
+}
+
 static void network_reports_the_port_it_chose(Test *test)
 {
     Arena *a = test->arena;
@@ -807,6 +917,9 @@ const TestCase PLATFORM_TESTS[] = {
     { "unix_sockets_carry_bytes", unix_sockets_carry_bytes },
     { "socket_pairs_carry_bytes_without_waiting", socket_pairs_carry_bytes_without_waiting },
     { "network_reports_the_port_it_chose", network_reports_the_port_it_chose },
+    { "sockets_move_bytes_without_waiting", sockets_move_bytes_without_waiting },
+    { "poller_reports_ready_sockets", poller_reports_ready_sockets },
+    { "poller_wakes_from_another_thread", poller_wakes_from_another_thread },
     { "file_lock_keeps_out_a_second_holder", file_lock_keeps_out_a_second_holder },
     { "detached_processes_lead_a_session_and_write_to_a_file", detached_processes_lead_a_session_and_write_to_a_file },
     { "detached_processes_leave_signals_to_the_program", detached_processes_leave_signals_to_the_program },
