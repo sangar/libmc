@@ -12,3 +12,5 @@ cacert 2026-10-20 https://github.com/sangar/libmc/releases/download/deps-cacert-
 md4c 0.6.0 https://github.com/sangar/libmc/releases/download/deps-md4c-0.6.0/md4c-0.6.0.tar.gz sha256:7f4bcf812b871857194b756b7ef82d5b8cdbc6886b24ed216f572f1aba9f6c72
 # expat: lib/ is Expat's lib/ without the entropy sources of other systems; xmltok_impl.c and xmltok_ns.c, which xmltok.c includes, are in lib/included.
 expat 2.9.0 https://github.com/sangar/libmc/releases/download/deps-expat-2.9.0/expat-2.9.0.tar.gz sha256:b945ea1eb004cb8faee7ca93a7bc62c45d13a65a98767b621d0081372e93816e
+# llhttp: upstream 9.4.3 with src/llhttp.c patched to refuse more than one space between the parts of the request line, as RFC 9112 3 asks; httpbed's conformance suite tests it.
+llhttp 9.4.3-single-spaces https://github.com/sangar/libmc/releases/download/deps-llhttp-9.4.3-single-spaces/llhttp-9.4.3-single-spaces.tar.gz sha256:25c64821ed326b1f964022574fc01483e14a6e637ec6606aa6bea1b641f5ef8b
