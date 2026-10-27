@@ -5,7 +5,7 @@
 //     ./nob                 debug library with sanitizers  -> out/debug/libmc.a
 //     ./nob release         optimised library              -> out/release/libmc.a
 //     ./nob fuzz            library instrumented for libFuzzer, $CC a clang that has it -> out/fuzz/libmc.a
-//     ./nob tsan            build and run the tests under ThreadSanitizer -> out/tsan/
+//     ./nob tsan            library under ThreadSanitizer -> out/tsan/libmc.a
 //     ./nob test            build and run the tests (debug)
 //     ./nob check           modern-c contract check, then the tests, then again under ThreadSanitizer
 //     ./nob cross           compile and archive for every target with zig cc
@@ -1106,10 +1106,8 @@ int main(int argc, char **argv)
     }
     Build build;
     configure(&build, flavor, NULL);
-    if (strcmp(mode, "tsan") == 0) {
-        return build_and_run_tests(&build);
-    }
-    if (strcmp(mode, "build") == 0 || strcmp(mode, "release") == 0 || strcmp(mode, "fuzz") == 0) {
+    if (strcmp(mode, "build") == 0 || strcmp(mode, "release") == 0 || strcmp(mode, "fuzz") == 0 ||
+        strcmp(mode, "tsan") == 0) {
         FileList objects = { 0 };
         char library[PATH_MAX_LEN];
         build_library(&build, &objects, library);
