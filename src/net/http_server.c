@@ -8,6 +8,7 @@
 #include "mc/platform/poll.h"
 #include "http1.h"
 #include "http2.h"
+#include "http_compress.h"
 #include "tls_session.h"
 
 enum { RECEIVE_BUFFER_BYTES = 16384, MAX_READY = 64, MAX_SWEEP_MS = 1000, NS_PER_MS = 1000000 };
@@ -57,6 +58,7 @@ typedef struct Exchange {
     HttpServerResponse response;
     bool failed;
     Http2Stream *stream; // the request's stream on HTTP/2, nullptr on HTTP/1.1
+    const HttpCompression *compression;
 } Exchange;
 
 // Loop is an event loop thread. Workers hand exchanges back through done,
@@ -157,6 +159,9 @@ static void run_exchange(void *argument)
     Err err = { 0 };
     exchange->failed =
         exchange->handler(exchange->context, exchange->arena, &exchange->request, &exchange->response, &err) != ERR_OK;
+    if (!exchange->failed && exchange->compression != nullptr) {
+        http_compress(exchange->arena, &exchange->request, &exchange->response, exchange->compression);
+    }
     Loop *loop = exchange->loop;
     bool pushed = queue_push(loop->done, exchange);
     assert(pushed);
@@ -177,6 +182,7 @@ static void start_exchange(Connection *connection, Arena *arena, const HttpServe
         .arena = arena,
         .request = *request,
         .stream = stream,
+        .compression = config->compression,
     };
     exchange->task = (Task){ .run = run_exchange, .argument = exchange };
     connection->in_flight++;
@@ -488,6 +494,11 @@ static HttpServerConfig config_with_defaults(Arena *arena, const HttpServerConfi
     limits->max_connections = limits->max_connections != 0 ? limits->max_connections : DEFAULT_LIMITS.max_connections;
     limits->timeout_ms = limits->timeout_ms > 0 ? limits->timeout_ms : DEFAULT_LIMITS.timeout_ms;
     resolved.loop_count = resolved.loop_count != 0 ? resolved.loop_count : 1;
+    if (config->compression != nullptr) {
+        HttpCompression *compression = arena_push(arena, sizeof *compression);
+        *compression = *config->compression;
+        resolved.compression = compression;
+    }
     return resolved;
 }
 
@@ -618,6 +629,9 @@ Error http_server_exchange(Arena *arena, const HttpServerConfig *config, StringL
             if (event == HTTP1_REQUEST) {
                 HttpServerResponse response = { .status = 200 };
                 Error e = resolved.handler(resolved.context, http1_arena(http), http1_request(http), &response, nullptr);
+                if (e == ERR_OK && resolved.compression != nullptr) {
+                    http_compress(http1_arena(http), http1_request(http), &response, resolved.compression);
+                }
                 open = http1_respond(http, e == ERR_OK ? &response : nullptr, false);
                 str_builder_append(&output, http1_take_output(http));
             }

@@ -62,6 +62,24 @@ typedef struct HttpServerLimits {
     int64_t timeout_ms;
 } HttpServerLimits;
 
+// HttpCompression is how a server gzips responses, after Basecamp's
+// Thruster: when the client accepts gzip, the response is not encoded
+// already, its Content-Type is text or another kind that compresses well
+// (JSON, JavaScript, XML, SVG, WebAssembly), its body is at least min_bytes
+// and its status carries one, and compressing makes it smaller. It then adds
+// Content-Encoding and Vary. The worker compresses after the handler.
+typedef struct HttpCompression {
+    size_t min_bytes; // smaller bodies go as they are
+    // jitter_bytes pads each gzipped response with 1 to this many random
+    // bytes, at most 254, in the gzip header, against BREACH, which reads
+    // secrets from compressed sizes; 0 pads nothing.
+    size_t jitter_bytes;
+    // skip_credentials leaves responses to requests carrying Cookie,
+    // Authorization or X-Csrf-Token uncompressed, as such responses are the
+    // ones that hold secrets.
+    bool skip_credentials;
+} HttpCompression;
+
 typedef struct HttpServerConfig {
     String address; // host:port as net_listen takes it; port 0 picks a free one
     HttpServerLimits limits;
@@ -72,6 +90,7 @@ typedef struct HttpServerConfig {
     // tls, when set, serves every connection over TLS with it; the server
     // borrows it until http_server_destroy. http_server_exchange ignores it.
     TlsServer *tls;
+    const HttpCompression *compression; // copied; nullptr compresses nothing
 } HttpServerConfig;
 
 typedef struct HttpServer HttpServer;
