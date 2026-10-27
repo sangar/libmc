@@ -13,6 +13,9 @@ String unicode_nfc(Arena *arena, String s);
 // mapping, one code point to one, so upper case "ß" is "ẞ", not "SS".
 String unicode_lower(Arena *arena, String s);
 String unicode_upper(Arena *arena, String s);
+// unicode_lower_codepoint maps one code point as unicode_lower does, for text
+// already decoded, such as the glyphs on a terminal screen.
+uint32_t unicode_lower_codepoint(uint32_t codepoint);
 // unicode_equal_ignore_case compares after simple case folding, so "ÆØÅ"
 // equals "æøå". It does not normalize: pass text that may be decomposed
 // through unicode_nfc first.
