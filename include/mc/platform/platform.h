@@ -15,6 +15,8 @@ int64_t clock_monotonic_ns(void);
 // clock_wall_ns is the time since the Unix epoch.
 int64_t clock_wall_ns(void);
 void clock_sleep_ms(int64_t milliseconds);
+// random_bytes fills buffer from the system's cryptographically secure generator.
+[[nodiscard]] Error random_bytes(void *buffer, size_t len, Err *err);
 // clock_local_offset is the local zone's offset from UTC in seconds east, at a Unix time.
 int32_t clock_local_offset(int64_t unix_seconds);
 
