@@ -243,6 +243,27 @@ static void http_server_continues_and_answers_head(Test *test)
                "HEAD has the length but no body");
 }
 
+static void http_server_exchanges_http2_with_prior_knowledge(Test *test)
+{
+    // The preface, empty SETTINGS, and HEADERS for GET / on stream 1 that end
+    // it: :method GET, :scheme http and :path / from HPACK's static table,
+    // and :authority h.
+    static const char REQUEST[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+                                  "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+                                  "\x00\x00\x06\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x01h";
+    String reply = exchange(test, (String){ REQUEST, sizeof REQUEST - 1 });
+    static const char STATUS_200[] = "\x01\x04\x00\x00\x00\x01\x88";
+    test_check(test, str_contains(reply, (String){ STATUS_200, sizeof STATUS_200 - 1 }) && str_contains(reply, S("GET / ")),
+               "the request is answered 200 on its stream");
+    // The same request, reset by RST_STREAM in the same read, before a handler took it.
+    static const char RESET[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+                                "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+                                "\x00\x00\x06\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x01h"
+                                "\x00\x00\x04\x03\x00\x00\x00\x00\x01\x00\x00\x00\x08";
+    reply = exchange(test, (String){ RESET, sizeof RESET - 1 });
+    test_check(test, !str_contains(reply, S("GET / ")), "a request reset before its handler ran is not answered");
+}
+
 static HttpServer *start_server_with(Test *test, HttpStreamHandler stream_handler)
 {
     HttpServerConfig config = {
@@ -386,6 +407,7 @@ static void http_server_sends_bodies_larger_than_the_socket_buffer(Test *test)
 // another such certificate, and files of both a client can trust.
 typedef struct Https {
     String directory;
+    String certificate;
     String ca_file;
     String other_ca_file;
     String other_certificate;
@@ -418,6 +440,7 @@ static bool https_start(Test *test, Https *https, HttpStreamHandler stream_handl
                   tls_server_create(&(TlsServerConfig){ .certificate_pem = certificate, .key_pem = key }, &https->tls,
                                     &err) == ERR_OK;
     }
+    https->certificate = certificate;
     config.tls = https->tls;
     started = started && http_server_create(&config, &https->server, &err) == ERR_OK;
     test_check(test, started, err.msg);
@@ -638,6 +661,12 @@ static void http_server_continues_streamed_uploads_only_when_read(Test *test)
     test_check(test, str_starts_with(read, S("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n")) &&
                          str_ends_with(read, hello),
                "an upload read is continued, and a chunked one hashed");
+    static const char *const MALFORMED[] = {
+        "POST /hash HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+        "never sent",
+    };
+    test_check(test, str_starts_with(converse(test->arena, port, MALFORMED, countof(MALFORMED)), S("HTTP/1.1 400 ")),
+               "a malformed body read is answered 400");
     http_server_destroy(server);
 }
 
@@ -684,6 +713,54 @@ static void http_server_lets_a_refused_upload_finish(Test *test)
     }
 }
 
+// tls_talk connects to port over TLS trusting ca_pem, offering protocol, and
+// reports whether the handshake held; it then asks for /version over HTTP/1.1.
+static bool tls_talk(Test *test, uint16_t port, String ca_pem, String protocol, String *chosen, String *reply)
+{
+    int fd = -1;
+    TlsConnection *tls = nullptr;
+    TlsClientConfig config = { .host = S("localhost"), .ca_pem = ca_pem, .protocols = &protocol, .protocol_count = 1 };
+    bool connected = net_connect(S("127.0.0.1"), str_format(test->arena, "%u", port), 1000, &fd, nullptr) == ERR_OK &&
+                     net_set_timeouts(fd, RECEIVE_TIMEOUT_MS, nullptr) == ERR_OK &&
+                     tls_connect(&config, fd, &tls, nullptr) == ERR_OK;
+    if (connected) {
+        *chosen = str_copy(test->arena, tls_protocol(tls));
+        char buffer[1024];
+        size_t got = 0;
+        if (tls_write(tls, S("GET /version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"), nullptr) ==
+            ERR_OK) {
+            StringBuilder text = str_builder_create(test->arena, 256);
+            while (tls_read(tls, buffer, sizeof buffer, &got, nullptr) == ERR_OK && got > 0) {
+                str_builder_append(&text, (String){ buffer, got });
+            }
+            *reply = str_builder_finish(&text);
+        }
+        tls_close(tls);
+    }
+    if (fd >= 0) {
+        net_close(fd);
+    }
+    return connected;
+}
+
+static void tls_connect_checks_the_server_and_offers_alpn(Test *test)
+{
+    Https https;
+    if (!https_start(test, &https, nullptr)) {
+        https_stop(&https);
+        return;
+    }
+    uint16_t port = http_server_port(https.server);
+    String chosen = { 0 };
+    String reply = { 0 };
+    test_check(test, tls_talk(test, port, https.certificate, S("http/1.1"), &chosen, &reply), "a trusted server");
+    test_check_str(test, chosen, S("http/1.1"), "ALPN chooses what was offered");
+    test_check(test, str_ends_with(reply, S("\r\n\r\n1.1")), "and it is spoken");
+    test_check(test, !tls_talk(test, port, https.other_certificate, S("h2"), &chosen, &reply),
+               "a certificate that does not chain to the trusted one fails");
+    https_stop(&https);
+}
+
 typedef struct SlowGet {
     Arena *arena;
     uint16_t port;
@@ -723,6 +800,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_refuses_ambiguous_requests", http_server_refuses_ambiguous_requests },
     { "http_server_gzips_what_is_worth_it", http_server_gzips_what_is_worth_it },
     { "http_server_answers_500_for_failures", http_server_answers_500_for_failures },
+    { "http_server_exchanges_http2_with_prior_knowledge", http_server_exchanges_http2_with_prior_knowledge },
     { "http_server_continues_and_answers_head", http_server_continues_and_answers_head },
     { "http_server_serves_the_http_client", http_server_serves_the_http_client },
     { "http_server_runs_slow_handlers_aside", http_server_runs_slow_handlers_aside },
@@ -731,6 +809,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_serves_https", http_server_serves_https },
     { "http_server_lets_a_refused_upload_finish", http_server_lets_a_refused_upload_finish },
     { "http_server_finishes_requests_when_stopped", http_server_finishes_requests_when_stopped },
+    { "tls_connect_checks_the_server_and_offers_alpn", tls_connect_checks_the_server_and_offers_alpn },
     { "http_server_streams_bodies_each_way", http_server_streams_bodies_each_way },
     { "http_server_streams_over_http2", http_server_streams_over_http2 },
     { "http_server_continues_streamed_uploads_only_when_read", http_server_continues_streamed_uploads_only_when_read },

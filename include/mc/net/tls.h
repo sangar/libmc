@@ -6,9 +6,11 @@
 #include "mc/core/error.h"
 #include "mc/text/str.h"
 
-// TLS for servers, on mbedTLS. A TlsServer holds the certificate a server
-// presents: an HttpServer, when HttpServerConfig's tls field takes it, or
-// one that reads and writes in turn through TlsConnection.
+// TLS on mbedTLS, mostly for servers. A TlsServer holds the certificate a
+// server presents: an HttpServer, when HttpServerConfig's tls field takes it,
+// or one that reads and writes in turn through TlsConnection. A client that
+// speaks a protocol of its own over TLS, as a test does to a server, uses
+// tls_connect; for HTTPS there is http.h.
 typedef struct TlsServer TlsServer;
 
 typedef struct TlsServerConfig {
@@ -40,16 +42,28 @@ void tls_server_destroy(TlsServer *server);
 [[nodiscard]] Error tls_self_signed(Arena *arena, String host, unsigned days, String *certificate_pem, String *key_pem,
                                     Err *err);
 
-// TlsConnection is the server's side of TLS over a blocking socket, for a
-// server that reads and writes in turn, such as one for mail or files, and
-// for STARTTLS on a connection that began in the clear.
+// TlsConnection is one side of TLS over a blocking socket, for a server that
+// reads and writes in turn, such as one for mail or files, for STARTTLS on a
+// connection that began in the clear, and for a client.
 typedef struct TlsConnection TlsConnection;
+
+typedef struct TlsClientConfig {
+    String host;   // the name the server's certificate must hold, sent by SNI
+    String ca_pem; // the certificates the server's must chain to
+    const String *protocols; // offered by ALPN, preferred first; none offers none
+    size_t protocol_count;
+} TlsClientConfig;
 
 // tls_accept runs the handshake on fd, a connected socket the caller keeps
 // owning and closes after tls_close; it waits as long as the socket's
 // timeouts allow. A failed handshake is ERR_NETWORK. The caller owns the
 // connection.
 [[nodiscard]] Error tls_accept(TlsServer *server, int fd, TlsConnection **connection, Err *err);
+
+// tls_connect runs a client's handshake on fd, as tls_accept does a
+// server's, offering TLS 1.2 and 1.3. A certificate that does not chain to
+// config's or does not name its host fails the handshake.
+[[nodiscard]] Error tls_connect(const TlsClientConfig *config, int fd, TlsConnection **connection, Err *err);
 
 // tls_protocol is the protocol ALPN chose, empty when the client named none.
 String tls_protocol(const TlsConnection *connection);

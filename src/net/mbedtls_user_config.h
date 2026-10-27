@@ -8,3 +8,7 @@
 // and HTTP clients run on several threads at once.
 #define MBEDTLS_THREADING_C
 #define MBEDTLS_THREADING_PTHREAD
+
+// The self-tests are never run, and the counter ECP keeps for them is
+// written by every handshake on any thread without a lock.
+#undef MBEDTLS_SELF_TEST

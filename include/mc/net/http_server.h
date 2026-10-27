@@ -58,7 +58,8 @@ typedef struct HttpExchange HttpExchange;
 // HttpStreamHandler answers the request in exchange: it may read the body
 // with http_exchange_read, then starts the response with http_exchange_start
 // and sends its body with http_exchange_write. Returning without starting is
-// answered with an empty 500, as is an error before starting; an error after
+// answered with an empty 500, as is an error before starting, or 400 when
+// the client framed the body wrongly; an error after
 // it, or a body shorter than announced, ends the connection on HTTP/1.1 or
 // resets the stream on HTTP/2, so the client sees the response was cut short.
 typedef Error (*HttpStreamHandler)(void *context, HttpExchange *exchange, Err *err);
@@ -149,6 +150,8 @@ void http_server_destroy(HttpServer *server);
 
 // http_server_exchange runs config's handler, not a stream_handler, on this thread, with no socket,
 // for one connection on which a client sends each piece in turn and then
-// closes. *answer is every byte the server answered, in arena.
+// closes. Pieces that begin with HTTP/2's connection preface are spoken to
+// as HTTP/2 is with prior knowledge, which a server on a socket does only
+// after ALPN chose it. *answer is every byte the server answered, in arena.
 [[nodiscard]] Error http_server_exchange(Arena *arena, const HttpServerConfig *config, StringList pieces,
                                          String *answer, Err *err);
