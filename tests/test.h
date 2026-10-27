@@ -61,6 +61,7 @@ extern const TestCase TERM_SCREEN_TESTS[];
 extern const TestCase TERM_LOG_TESTS[];
 extern const TestCase HTTP_SERVER_TESTS[];
 extern const TestCase STATIC_FILES_TESTS[];
+extern const TestCase ACME_TESTS[];
 extern const AbortCase ABORT_CASES[];
 
 // Abort cases that live with the tests that run them.
