@@ -23,7 +23,8 @@ typedef struct ColorEnvironment {
 // none, 2 is 256 colours, 3 is true colour, anything else 16. Then a
 // non-empty NO_COLOR (https://no-color.org), output that is not a terminal
 // and TERM=dumb are none; COLORTERM truecolor or 24bit is true colour; a TERM
-// with 256color is 256; any other terminal is 16.
+// with 256color is 256; a TERM naming a true-colour terminal, such as
+// xterm-kitty, alacritty or xterm-direct, is true colour; any other terminal is 16.
 ColorDepth color_depth_of(ColorEnvironment environment);
 // color_depth_detect is color_depth_of with this process's environment, read
 // into arena; is_terminal says whether the output is a terminal.

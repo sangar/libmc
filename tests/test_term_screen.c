@@ -161,6 +161,15 @@ static void screen_wraps_with_the_theme_colours(Test *test)
     screen_destroy(screen);
 }
 
+static void rects_hold_their_cells(Test *test)
+{
+    Rect rect = { 2, 3, 4, 5 };
+    Rect inner = rect_inner(rect);
+    test_check(test, inner.x == 3 && inner.y == 4 && inner.width == 2 && inner.height == 3, "inside the border");
+    test_check(test, rect_contains(rect, 2, 3) && rect_contains(rect, 5, 7), "the corners are in");
+    test_check(test, !rect_contains(rect, 6, 3) && !rect_contains(rect, 2, 8), "the far edges are out");
+}
+
 const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_writes_only_what_changed", screen_writes_only_what_changed },
     { "screen_keeps_wide_glyphs_whole", screen_keeps_wide_glyphs_whole },
@@ -168,5 +177,6 @@ const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_draws_styled_text", screen_draws_styled_text },
     { "screen_wraps_log_lines", screen_wraps_log_lines },
     { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
+    { "rects_hold_their_cells", rects_hold_their_cells },
     { nullptr, nullptr },
 };

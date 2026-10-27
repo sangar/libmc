@@ -30,6 +30,10 @@ typedef struct Rect {
     int height;
 } Rect;
 
+// rect_inner is rect without a border of one cell.
+Rect rect_inner(Rect rect);
+bool rect_contains(Rect rect, int x, int y);
+
 // screen_create makes an empty screen that renders colours at depth; it
 // owns its memory until screen_destroy.
 Screen *screen_create(ColorDepth depth);
