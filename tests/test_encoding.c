@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include "mc/encoding/csv.h"
+#include "mc/encoding/base64.h"
 #include "mc/encoding/dotenv.h"
 #include "mc/encoding/json.h"
 #include "mc/encoding/markdown.h"
@@ -282,6 +283,53 @@ static void yaml_rejects_malformed_input(Test *test)
     test_check_str(test, S(err.msg), S("yaml: line 1, column 14: alias inside the node it names"), "names the alias");
 }
 
+static void base64_round_trips_the_rfc_4648_examples(Test *test)
+{
+    static const struct {
+        const char *data;
+        const char *standard;
+        const char *url;
+    } EXAMPLES[] = {
+        { "", "", "" },
+        { "f", "Zg==", "Zg" },
+        { "fo", "Zm8=", "Zm8" },
+        { "foo", "Zm9v", "Zm9v" },
+        { "foob", "Zm9vYg==", "Zm9vYg" },
+        { "fooba", "Zm9vYmE=", "Zm9vYmE" },
+        { "foobar", "Zm9vYmFy", "Zm9vYmFy" },
+        { "\xfb\xff", "+/8=", "-_8" },
+    };
+    for (size_t i = 0; i < countof(EXAMPLES); i++) {
+        String data = S(EXAMPLES[i].data);
+        test_check_str(test, base64_encode(test->arena, data, BASE64_STANDARD), S(EXAMPLES[i].standard), "standard");
+        test_check_str(test, base64_encode(test->arena, data, BASE64_URL), S(EXAMPLES[i].url), "url");
+        String decoded = { 0 };
+        test_check(test, base64_decode(test->arena, S(EXAMPLES[i].standard), BASE64_STANDARD, &decoded),
+                   "decode standard");
+        test_check_str(test, decoded, data, "decoded standard");
+        test_check(test, base64_decode(test->arena, S(EXAMPLES[i].url), BASE64_URL, &decoded), "decode url");
+        test_check_str(test, decoded, data, "decoded url");
+    }
+}
+
+static void base64_refuses_malformed_text(Test *test)
+{
+    static const struct {
+        const char *text;
+        Base64Alphabet alphabet;
+    } MALFORMED[] = {
+        { "Zg=", BASE64_STANDARD },  { "Zg", BASE64_STANDARD },   { "Zm9v!A==", BASE64_STANDARD },
+        { "-_8=", BASE64_STANDARD }, { "Zh==", BASE64_STANDARD }, { "Zg==Zg==", BASE64_STANDARD },
+        { "Zg==", BASE64_URL },      { "Z", BASE64_URL },         { "+/8", BASE64_URL },
+        { "Zh", BASE64_URL },
+    };
+    for (size_t i = 0; i < countof(MALFORMED); i++) {
+        String decoded = { 0 };
+        test_check(test, !base64_decode(test->arena, S(MALFORMED[i].text), MALFORMED[i].alphabet, &decoded),
+                   MALFORMED[i].text);
+    }
+}
+
 static void dotenv_reads_names_and_values(Test *test)
 {
     static const char TEXT[] = "# settings\n"
@@ -558,6 +606,8 @@ static void xml_rejects_malformed_and_hostile_documents(Test *test)
 }
 
 const TestCase ENCODING_TESTS[] = {
+    { "base64_round_trips_the_rfc_4648_examples", base64_round_trips_the_rfc_4648_examples },
+    { "base64_refuses_malformed_text", base64_refuses_malformed_text },
     { "json_parses_every_kind", json_parses_every_kind },
     { "json_decodes_strings", json_decodes_strings },
     { "json_rejects_malformed_input", json_rejects_malformed_input },
