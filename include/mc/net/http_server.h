@@ -6,10 +6,12 @@
 #include "mc/core/arena.h"
 #include "mc/core/error.h"
 #include "mc/net/http.h"
+#include "mc/net/tls.h"
 #include "mc/text/str.h"
 
-// An HTTP/1.1 server for web applications. Event loops own the connections
-// and parse requests with llhttp; a pool of worker threads runs the handler,
+// An HTTP/1.1 server for web applications, over TLS when given a TlsServer.
+// Event loops own the connections and parse requests with llhttp; a pool of
+// worker threads runs the handler,
 // so a handler may block, as on a database query, without holding up other
 // connections. Requests are refused unless they are unambiguous: one Host,
 // no Content-Length beside Transfer-Encoding, single spaces, CRLF line ends.
@@ -65,6 +67,9 @@ typedef struct HttpServerConfig {
     size_t worker_count; // handler threads: one per CPU
     HttpHandler handler;
     void *context;
+    // tls, when set, serves every connection over TLS with it; the server
+    // borrows it until http_server_destroy. http_server_exchange ignores it.
+    TlsServer *tls;
 } HttpServerConfig;
 
 typedef struct HttpServer HttpServer;
