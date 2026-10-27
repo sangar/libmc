@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "mc/core/arena.h"
+#include "mc/core/base.h"
 #include "mc/platform/poll.h"
 
 enum { MAX_READY = 256 };
@@ -79,8 +80,9 @@ size_t poller_wait(Poller *poller, void **ready, size_t capacity, int timeout_ms
     for (int i = 0; i < count; i++) {
         ready[i] = events[i].data.ptr;
         if (ready[i] == nullptr) {
-            uint64_t wakes = 0;
-            unused(read(poller->wake, &wakes, sizeof wakes));
+            // Reading resets the count; a read that finds it already reset is as good.
+            eventfd_t wakes = 0;
+            unused(eventfd_read(poller->wake, &wakes));
         }
     }
     return count > 0 ? (size_t)count : 0;
@@ -88,8 +90,8 @@ size_t poller_wait(Poller *poller, void **ready, size_t capacity, int timeout_ms
 
 void poller_wake(Poller *poller)
 {
-    uint64_t one = 1;
-    unused(write(poller->wake, &one, sizeof one));
+    // Adding fails only when the count would overflow, and then a wake is already pending.
+    unused(eventfd_write(poller->wake, 1));
 }
 
 #endif
