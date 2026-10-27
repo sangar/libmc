@@ -610,6 +610,26 @@ static void xml_reads_elements_attributes_and_text(Test *test)
                "events know their line");
 }
 
+static void xml_writes_what_it_reads_back(Test *test)
+{
+    XmlWriter xml = xml_writer_create(test->arena);
+    const XmlAttribute attributes[] = { { S("xmlns"), S("http://s3.amazonaws.com/doc/2006-03-01/") },
+                                        { S("note"), S("\"a\" & 'b'") } };
+    xml_writer_start(&xml, S("ListBucketResult"), attributes, countof(attributes));
+    xml_writer_element(&xml, S("Key"), S("blåbær <og> & bringebær"));
+    xml_writer_start(&xml, S("Empty"), nullptr, 0);
+    xml_writer_end(&xml, S("Empty"));
+    xml_writer_end(&xml, S("ListBucketResult"));
+    String document = xml_writer_finish(&xml);
+    test_check(test, str_starts_with(document, S("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult ")),
+               "the declaration comes first");
+    test_check(test, str_contains(document, S("<Key>blåbær &lt;og&gt; &amp; bringebær</Key>")), "text is escaped");
+    test_check_str(test, xml_outline(test, document),
+                   S("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\" note=\"\"a\" & 'b'\">"
+                     "<Key>[blåbær <og> & bringebær]</Key><Empty></Empty></ListBucketResult>"),
+                   "the parser reads back what was written");
+}
+
 static void xml_rejects_malformed_and_hostile_documents(Test *test)
 {
     XmlEvents events = { 0 };
@@ -666,5 +686,6 @@ const TestCase ENCODING_TESTS[] = {
     { "markdown_keeps_html_and_scripts_out", markdown_keeps_html_and_scripts_out },
     { "xml_reads_elements_attributes_and_text", xml_reads_elements_attributes_and_text },
     { "xml_rejects_malformed_and_hostile_documents", xml_rejects_malformed_and_hostile_documents },
+    { "xml_writes_what_it_reads_back", xml_writes_what_it_reads_back },
     { nullptr, nullptr },
 };
