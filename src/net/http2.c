@@ -26,6 +26,7 @@ struct Http2Stream {
     bool body_ended;   // the client sent all of it
     bool body_dropped; // the handler is done, so the rest is thrown away
     bool body_too_large;
+    bool queued;       // in the ready list, so a reset does not free it yet
     bool with_handler; // a handler holds the request, so the stream outlives a reset
     bool closed;       // nghttp2 is done with it
     StringBuilder response_body;
@@ -61,10 +62,10 @@ static void stream_free(Http2Stream *stream)
     arena_destroy(stream->arena);
 }
 
-// release frees stream once neither nghttp2 nor a handler holds it.
+// release frees stream once neither nghttp2, the ready list nor a handler holds it.
 static void release(Http2Stream *stream)
 {
-    if (stream->closed && !stream->with_handler) {
+    if (stream->closed && !stream->queued && !stream->with_handler) {
         stream_free(stream);
     }
 }
@@ -179,6 +180,7 @@ static void complete(Http2 *http, Http2Stream *stream)
         http->ready = stream;
     }
     http->ready_last = stream;
+    stream->queued = true;
 }
 
 static void respond_now(Http2 *http, Http2Stream *stream, unsigned status);
@@ -435,6 +437,12 @@ bool http2_next_request(Http2 *http, Http2Request *request)
     http->ready = stream->next_ready;
     if (http->ready == nullptr) {
         http->ready_last = nullptr;
+    }
+    stream->queued = false;
+    // A stream the client reset while it waited goes to no handler.
+    if (stream->closed) {
+        stream_free(stream);
+        return http2_next_request(http, request);
     }
     stream->with_handler = true;
     *request = (Http2Request){ .stream = stream, .arena = stream->arena, .request = &stream->request };

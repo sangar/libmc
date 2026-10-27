@@ -255,6 +255,13 @@ static void http_server_exchanges_http2_with_prior_knowledge(Test *test)
     static const char STATUS_200[] = "\x01\x04\x00\x00\x00\x01\x88";
     test_check(test, str_contains(reply, (String){ STATUS_200, sizeof STATUS_200 - 1 }) && str_contains(reply, S("GET / ")),
                "the request is answered 200 on its stream");
+    // The same request, reset by RST_STREAM in the same read, before a handler took it.
+    static const char RESET[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+                                "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+                                "\x00\x00\x06\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x01h"
+                                "\x00\x00\x04\x03\x00\x00\x00\x00\x01\x00\x00\x00\x08";
+    reply = exchange(test, (String){ RESET, sizeof RESET - 1 });
+    test_check(test, !str_contains(reply, S("GET / ")), "a request reset before its handler ran is not answered");
 }
 
 static HttpServer *start_server_with(Test *test, HttpStreamHandler stream_handler)
