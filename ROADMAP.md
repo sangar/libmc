@@ -4,15 +4,16 @@ libmc is the foundation library for C projects under the `modern-c` contract. A 
 
 It is not a port of Foundation's API, not a shared library with a stable ABI, and not for Windows until `src/platform/` has a Windows implementation. This file covers one repository, [sangar/libmc](https://github.com/sangar/libmc).
 
-Checked on 2026-10-25
+Checked on 2026-10-26
 
 ## Focus
 
 libmc is in use by projects under the `modern-c` contract, such as dbox and bprocs, and is where they get shared code. JSON, YAML, CSV, Markdown, XML, the HTTP and S3 clients, mail and FTP are in. What moves it forward now is the piece those projects reach for next:
 
 1. **SSH and SFTP:** waits for libssh2 to build with mbedTLS 4. See [SSH and SFTP](#ssh-and-sftp).
+2. **HTTP server:** for web apps written in C, served directly. See [HTTP server](#http-server).
 
-While it is blocked, the next piece comes from the ideas [worth doing soon](#worth-doing-soon). Small items wait unless they block one of these.
+While SSH is blocked, the HTTP server is the next piece. Small items wait unless they block one of these.
 
 ## Principles
 
@@ -66,6 +67,18 @@ Done. Merged on 24 October 2026 through PRs #24 and #26. Both use the curl libmc
 Now, and blocked. curl speaks SSH and SFTP through libssh2 (BSD), which needs a crypto library underneath. [libssh2 1.11.1 does not build with mbedTLS 4.x](https://github.com/libssh2/libssh2/pull/2284), and the pull request that moves its mbedTLS backend to the PSA API is open and, by its author on 5 October 2026, needs a heavy rework or a fresh start.
 
 - [ ] **Run commands and move files over SSH.** `mc/net/ssh.h` on a branch `ssh`, once a libssh2 release builds with mbedTLS 4. Check each libssh2 release until then.
+
+## HTTP server
+
+Now. Web apps in C, such as those the `c-web-apps` skill builds, should be served by their own binary, with what [Thruster](https://github.com/basecamp/thruster) puts in front of Rails: HTTP/2, Let's Encrypt, compression and caching. It is built and tested in the httpbed testbed first, where a conformance suite and a differential fuzzer hold it to libmicrohttpd and llhttp, and moves here one module at a time.
+
+- [ ] **Wait on many sockets.** `mc/platform/poll.h` on kqueue and epoll, and `net_try_accept`, `net_try_receive` and `net_try_send` in `platform.h`, on a branch `poll`. A decision report, our own poller against libuv, approved on 26 October 2026: libuv's completion model fits mbedTLS and nghttp2 less well than readiness does, and Windows is not a target.
+- [ ] **Serve HTTP/1.1.** `mc/net/http_server.h`: event loops own the connections, worker threads run the handler. A decision report, llhttp against picohttpparser, approved on 26 October 2026: llhttp frames bodies itself, where request smuggling happens. It needs llhttp pinned as `deps-llhttp-9.4.3`, with the testbed's patch that refuses extra spaces in the request line.
+- [ ] **Serve files,** with ranges, ETag and 304, and `sendfile` over plain HTTP.
+- [ ] **TLS and HTTP/2,** on the mbedTLS and nghttp2 libmc already pins.
+- [ ] **Let's Encrypt,** an ACME client on the HTTP client, mbedTLS and JSON.
+- [ ] **Compression,** gzip with Thruster's BREACH mitigations, and precompressed files.
+- [ ] **A response cache,** for `Cache-Control: public` responses, when a project needs one.
 
 ## Feature ideas
 

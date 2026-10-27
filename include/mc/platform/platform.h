@@ -293,3 +293,25 @@ void net_close(int fd);
 // net_shutdown ends both directions of fd, which wakes a thread blocked in
 // net_receive on it. The descriptor stays open until net_close.
 void net_shutdown(int fd);
+
+// NetResult is how far a call that does not wait got, for event loops on
+// mc/platform/poll.h.
+typedef enum NetResult {
+    NET_DONE,        // some bytes moved
+    NET_WOULD_BLOCK, // none can move until the socket is ready
+    NET_CLOSED,      // the peer closed, or the connection failed
+} NetResult;
+
+// net_set_nonblocking makes calls on fd return instead of waiting, as a
+// listener for net_try_accept needs.
+[[nodiscard]] Error net_set_nonblocking(int fd, Err *err);
+// net_try_accept takes a connection that is already waiting and reports
+// whether there was one. The connection is non-blocking, never raises
+// SIGPIPE, and over TCP sends without Nagle's delay.
+bool net_try_accept(int listener, int *client);
+// net_try_receive reads up to capacity bytes that have arrived. Unlike
+// net_receive_nowait it tells a peer that closed from one that is quiet.
+NetResult net_try_receive(int fd, void *buffer, size_t capacity, size_t *got);
+// net_try_send writes what of data the socket takes now. On a socket libmc
+// opened or accepted it never raises SIGPIPE.
+NetResult net_try_send(int fd, String data, size_t *sent);
