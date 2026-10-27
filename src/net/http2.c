@@ -1,13 +1,15 @@
 #include "http2.h"
 
+#include <assert.h>
 #include <stdlib.h>
 
 #include <nghttp2/nghttp2.h>
 
+#include "http1.h"
 #include "mc/platform/platform.h"
 #include "mc/text/fmt.h"
 
-enum { MAX_CONCURRENT_STREAMS = 100, OUTPUT_CAPACITY = 16384, MAX_RESPONSE_HEADERS = 64, SECONDS_PER_DAY = 86400 };
+enum { MAX_CONCURRENT_STREAMS = 100, STREAM_WINDOW_BYTES = 65535, OUTPUT_CAPACITY = 16384, MAX_RESPONSE_HEADERS = 64, SECONDS_PER_DAY = 86400 };
 
 struct Http2Stream {
     Http2 *http;
@@ -20,11 +22,15 @@ struct Http2Stream {
     size_t header_bytes;
     String authority;
     StringBuilder body;
+    size_t body_taken; // streamed body bytes already read
+    bool body_ended;   // the client sent all of it
+    bool body_dropped; // the handler is done, so the rest is thrown away
     bool body_too_large;
     bool with_handler; // a handler holds the request, so the stream outlives a reset
     bool closed;       // nghttp2 is done with it
-    String response_body;
+    StringBuilder response_body;
     size_t response_sent;
+    bool response_ended; // every piece of a streamed body is in response_body
     Http2Stream *next_ready;
     Http2Stream *previous; // in the connection's list of live streams
     Http2Stream *next;
@@ -36,6 +42,7 @@ struct Http2 {
     Http2Stream *ready;      // complete requests not yet taken, oldest first
     Http2Stream *ready_last;
     Http2Stream *streams; // every stream not yet freed
+    bool streaming;       // requests go out at the end of their head
     StringBuilder output;
     Arena *arena;
 };
@@ -75,6 +82,7 @@ static int begin_headers(nghttp2_session *session, const nghttp2_frame *frame, v
         .id = frame->hd.stream_id,
         .arena = arena,
         .body = str_builder_create(arena, 256),
+        .response_body = str_builder_create(arena, 256),
         .next = http->streams,
     };
     if (http->streams != nullptr) {
@@ -118,6 +126,14 @@ static int data_chunk(nghttp2_session *session, uint8_t flags, int32_t stream_id
 {
     Http2 *http = user_data;
     Http2Stream *stream = nghttp2_session_get_stream_user_data(session, stream_id);
+    if (http->streaming && (stream == nullptr || stream->body_dropped)) {
+        unused(nghttp2_session_consume(session, stream_id, len));
+        return 0;
+    }
+    if (http->streaming) {
+        str_builder_append(&stream->body, (String){ (const char *)data, len });
+        return 0;
+    }
     if (stream == nullptr || stream->body_too_large) {
         return 0;
     }
@@ -167,9 +183,27 @@ static void complete(Http2 *http, Http2Stream *stream)
 
 static void respond_now(Http2 *http, Http2Stream *stream, unsigned status);
 
+// streamed_frame_received gives out a request once its head is in, and
+// notes where its body ends.
+static void streamed_frame_received(Http2 *http, const nghttp2_frame *frame)
+{
+    Http2Stream *stream = nghttp2_session_get_stream_user_data(http->session, frame->hd.stream_id);
+    if (stream == nullptr) {
+        return;
+    }
+    stream->body_ended = stream->body_ended || (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0;
+    if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_REQUEST) {
+        complete(http, stream);
+    }
+}
+
 static int frame_received(nghttp2_session *session, const nghttp2_frame *frame, void *user_data)
 {
     Http2 *http = user_data;
+    if (http->streaming) {
+        streamed_frame_received(http, frame);
+        return 0;
+    }
     bool ends_stream = (frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) &&
                        (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0;
     Http2Stream *stream = ends_stream ? nghttp2_session_get_stream_user_data(session, frame->hd.stream_id) : nullptr;
@@ -199,12 +233,15 @@ static nghttp2_ssize read_body(nghttp2_session *session, int32_t stream_id, uint
 {
     Http2Stream *stream = source->ptr;
     size_t left = stream->response_body.len - stream->response_sent;
+    if (left == 0 && !stream->response_ended) {
+        return NGHTTP2_ERR_DEFERRED;
+    }
     size_t count = left < length ? left : length;
     for (size_t i = 0; i < count; i++) {
         buffer[i] = (uint8_t)stream->response_body.data[stream->response_sent + i];
     }
     stream->response_sent += count;
-    if (stream->response_sent == stream->response_body.len) {
+    if (stream->response_sent == stream->response_body.len && stream->response_ended) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
     return (nghttp2_ssize)count;
@@ -276,11 +313,38 @@ static String lowercase(Arena *arena, String text)
     return (String){ lower, text.len };
 }
 
+static bool bodyless(const Http2Stream *stream, unsigned status)
+{
+    return str_equal(stream->request.method, S("HEAD")) || status == 204 || status == 304;
+}
+
+// submit_head sends a response's head on stream, with Content-Length unless
+// it is negative, and a body from response_body unless it has none.
+static void submit_head(Http2 *http, Http2Stream *stream, unsigned status, const HttpHeader *headers,
+                        size_t header_count, int64_t content_length)
+{
+    Arena *arena = stream->arena;
+    nghttp2_nv fields[MAX_RESPONSE_HEADERS + 3];
+    size_t count = 0;
+    fields[count++] = field(S(":status"), str_format(arena, "%u", status));
+    fields[count++] = field(S("date"), date(arena));
+    if (status != 204 && status != 304 && content_length >= 0) {
+        fields[count++] = field(S("content-length"), str_format(arena, "%lld", (long long)content_length));
+    }
+    for (size_t i = 0; i < header_count && count < countof(fields); i++) {
+        if (field_allowed(headers[i].name)) {
+            fields[count++] = field(lowercase(arena, headers[i].name), headers[i].value);
+        }
+    }
+    nghttp2_data_provider2 body = { .source.ptr = stream, .read_callback = read_body };
+    unused(nghttp2_submit_response2(http->session, stream->id, fields, count,
+                                    bodyless(stream, status) ? nullptr : &body));
+}
+
 // submit sends response on stream: a body unless the request was HEAD or
 // the status has none, and a 500 in its place when a field cannot go out.
 static void submit(Http2 *http, Http2Stream *stream, const HttpServerResponse *response)
 {
-    Arena *arena = stream->arena;
     HttpServerResponse failure = { .status = 500 };
     for (size_t i = 0; response != nullptr && i < response->header_count; i++) {
         if (!field_valid(response->headers[i].name, response->headers[i].value)) {
@@ -288,23 +352,10 @@ static void submit(Http2 *http, Http2Stream *stream, const HttpServerResponse *r
         }
     }
     response = response != nullptr ? response : &failure;
-    bool bodyless = str_equal(stream->request.method, S("HEAD")) || response->status == 204 || response->status == 304;
-    nghttp2_nv fields[MAX_RESPONSE_HEADERS + 3];
-    size_t count = 0;
-    fields[count++] = field(S(":status"), str_format(arena, "%u", response->status));
-    fields[count++] = field(S("date"), date(arena));
-    if (response->status != 204 && response->status != 304) {
-        fields[count++] = field(S("content-length"), str_format(arena, "%zu", response->body.len));
-    }
-    for (size_t i = 0; i < response->header_count && count < countof(fields); i++) {
-        if (field_allowed(response->headers[i].name)) {
-            fields[count++] = field(lowercase(arena, response->headers[i].name), response->headers[i].value);
-        }
-    }
-    stream->response_body = bodyless ? S("") : str_copy(arena, response->body);
-    nghttp2_data_provider2 body = { .source.ptr = stream, .read_callback = read_body };
-    unused(nghttp2_submit_response2(http->session, stream->id, fields, count,
-                                    stream->response_body.len > 0 ? &body : nullptr));
+    str_builder_append(&stream->response_body, response->body);
+    stream->response_ended = true;
+    submit_head(http, stream, response->status, response->headers, response->header_count,
+                (int64_t)response->body.len);
 }
 
 // respond_now answers stream with an empty status without a handler.
@@ -314,11 +365,16 @@ static void respond_now(Http2 *http, Http2Stream *stream, unsigned status)
     submit(http, stream, &response);
 }
 
-Http2 *http2_create(HttpServerLimits limits)
+Http2 *http2_create(HttpServerLimits limits, bool streaming)
 {
     Arena *arena = arena_create(0);
     Http2 *http = arena_push(arena, sizeof *http);
-    *http = (Http2){ .arena = arena, .limits = limits, .output = str_builder_create(arena, OUTPUT_CAPACITY) };
+    *http = (Http2){
+        .arena = arena,
+        .limits = limits,
+        .streaming = streaming,
+        .output = str_builder_create(arena, OUTPUT_CAPACITY),
+    };
     nghttp2_session_callbacks *callbacks = nullptr;
     // nghttp2 fails these only when out of memory, which aborts everywhere else in libmc.
     if (nghttp2_session_callbacks_new(&callbacks) != 0) {
@@ -329,10 +385,24 @@ Http2 *http2_create(HttpServerLimits limits)
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, data_chunk);
     nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, frame_received);
     nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, stream_closed);
-    int status = nghttp2_session_server_new(&http->session, callbacks, http);
+    nghttp2_option *option = nullptr;
+    if (nghttp2_option_new(&option) != 0) {
+        abort();
+    }
+    // A streamed body's window opens as the handler reads it, so a slow
+    // reader slows the client instead of filling memory.
+    nghttp2_option_set_no_auto_window_update(option, streaming ? 1 : 0);
+    int status = nghttp2_session_server_new2(&http->session, callbacks, http, option);
+    nghttp2_option_del(option);
     nghttp2_session_callbacks_del(callbacks);
     nghttp2_settings_entry settings[] = { { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, MAX_CONCURRENT_STREAMS } };
     if (status != 0 || nghttp2_submit_settings(http->session, NGHTTP2_FLAG_NONE, settings, countof(settings)) != 0) {
+        abort();
+    }
+    // Each stream's own window bounds its unread body; the connection's
+    // covers them all, so one slow reader holds up no other stream.
+    if (streaming && nghttp2_session_set_local_window_size(http->session, NGHTTP2_FLAG_NONE, 0,
+                                                           MAX_CONCURRENT_STREAMS * STREAM_WINDOW_BYTES) != 0) {
         abort();
     }
     return http;
@@ -379,6 +449,76 @@ void http2_respond(Http2 *http, Http2Stream *stream, const HttpServerResponse *r
         return;
     }
     submit(http, stream, response);
+}
+
+String http2_body(const Http2Stream *stream)
+{
+    return (String){ stream->body.data + stream->body_taken, stream->body.len - stream->body_taken };
+}
+
+void http2_body_take(Http2 *http, Http2Stream *stream, size_t count)
+{
+    stream->body_taken += count;
+    if (stream->body_taken == stream->body.len) {
+        stream->body.len = 0;
+        stream->body_taken = 0;
+    }
+    unused(nghttp2_session_consume(http->session, stream->id, count));
+}
+
+bool http2_body_ended(const Http2Stream *stream)
+{
+    return stream->body_ended && stream->body_taken == stream->body.len;
+}
+
+bool http2_stream_closed(const Http2Stream *stream)
+{
+    return stream->closed;
+}
+
+void http2_start(Http2 *http, Http2Stream *stream, unsigned status, const HttpHeader *headers, size_t header_count,
+                 int64_t content_length)
+{
+    assert(http1_fields_valid(status, headers, header_count));
+    if (!stream->closed) {
+        submit_head(http, stream, status, headers, header_count, content_length);
+    }
+}
+
+bool http2_writable(const Http2Stream *stream)
+{
+    return stream->response_sent == stream->response_body.len;
+}
+
+void http2_write(Http2 *http, Http2Stream *stream, String data)
+{
+    if (stream->closed) {
+        return;
+    }
+    if (http2_writable(stream)) {
+        stream->response_body.len = 0;
+        stream->response_sent = 0;
+    }
+    str_builder_append(&stream->response_body, data);
+    unused(nghttp2_session_resume_data(http->session, stream->id));
+}
+
+void http2_end(Http2 *http, Http2Stream *stream, bool complete)
+{
+    stream->with_handler = false;
+    if (stream->closed) {
+        stream_free(stream);
+        return;
+    }
+    // The rest of a body the handler did not read is let in and thrown away.
+    stream->body_dropped = true;
+    http2_body_take(http, stream, http2_body(stream).len);
+    if (complete) {
+        stream->response_ended = true;
+        unused(nghttp2_session_resume_data(http->session, stream->id));
+    } else {
+        unused(nghttp2_submit_rst_stream(http->session, NGHTTP2_FLAG_NONE, stream->id, NGHTTP2_INTERNAL_ERROR));
+    }
 }
 
 String http2_take_output(Http2 *http)
