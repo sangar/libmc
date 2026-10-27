@@ -938,6 +938,30 @@ static void http_verifies_tls_certificates(Test *test)
     tls_server_destroy(&tls);
 }
 
+// http_leaves_crypto_to_others_in_the_process checks that a key someone
+// else holds in mbedTLS, such as a TLS server, outlives the last HTTP client.
+static void http_leaves_crypto_to_others_in_the_process(Test *test)
+{
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attributes, 128);
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attributes, PSA_ALG_GCM);
+    mbedtls_svc_key_id_t key = MBEDTLS_SVC_KEY_ID_INIT;
+    test_check(test, psa_crypto_init() == PSA_SUCCESS && psa_generate_key(&attributes, &key) == PSA_SUCCESS,
+               "make a key");
+    HttpClientConfig config = { 0 };
+    HttpClient *client = nullptr;
+    test_check(test, http_client_create(&config, &client, nullptr) == ERR_OK, "create a client");
+    if (client != nullptr) {
+        http_client_destroy(client);
+    }
+    psa_key_attributes_t found = PSA_KEY_ATTRIBUTES_INIT;
+    test_check(test, psa_get_key_attributes(key, &found) == PSA_SUCCESS, "the key is still there");
+    psa_reset_key_attributes(&found);
+    psa_destroy_key(key);
+}
+
 static void http_speaks_http2_when_offered(Test *test)
 {
     TlsServer tls;
@@ -1430,6 +1454,7 @@ const TestCase HTTP_TESTS[] = {
     { "http_enforces_limits", http_enforces_limits },
     { "http_verifies_tls_certificates", http_verifies_tls_certificates },
     { "http_speaks_http2_when_offered", http_speaks_http2_when_offered },
+    { "http_leaves_crypto_to_others_in_the_process", http_leaves_crypto_to_others_in_the_process },
     { "http_decodes_compressed_responses", http_decodes_compressed_responses },
     { "http_streams_bodies_through_files", http_streams_bodies_through_files },
     { "http_cancels_and_times_out_per_request", http_cancels_and_times_out_per_request },
