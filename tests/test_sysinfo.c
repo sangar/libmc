@@ -53,7 +53,16 @@ static void process_groups_sample_adds_up_each_group(Test *test)
     pty_close(&pty);
 }
 
+static void samples_make_shares_and_rates(Test *test)
+{
+    test_check(test, cpu_busy_share((CpuTicks){ 10, 100 }, (CpuTicks){ 35, 200 }) == 0.25f, "a quarter busy");
+    test_check(test, cpu_busy_share((CpuTicks){ 10, 100 }, (CpuTicks){ 10, 100 }) == 0.0f, "no time passed");
+    test_check(test, counter_rate(1000, 3000, 2.0) == 1000.0, "grew 1000 a second");
+    test_check(test, counter_rate(3000, 1000, 2.0) == 0.0, "a reset counter");
+}
+
 const TestCase SYSINFO_TESTS[] = {
+    { "samples_make_shares_and_rates", samples_make_shares_and_rates },
     { "system_sample_reads_the_machine", system_sample_reads_the_machine },
     { "process_groups_sample_adds_up_each_group", process_groups_sample_adds_up_each_group },
     { nullptr, nullptr },

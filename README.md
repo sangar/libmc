@@ -145,7 +145,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/platform/service.h` | Per-user login services: launchd agents and systemd user units |
 | | `mc/platform/terminal.h` | The controlling terminal in raw mode, its size and the width of any terminal descriptor, and waits that wake on input, resizes or another thread |
 | | `mc/platform/pty.h` | Programs run on a pseudo-terminal of their own: output, typed input, resizing, signals to the whole process group |
-| | `mc/platform/sysinfo.h` | CPU ticks per core, memory, swap, network bytes, load and uptime, and the CPU time and memory of a process group |
+| | `mc/platform/sysinfo.h` | CPU ticks per core, memory, swap, network bytes, load and uptime, the CPU time and memory of a process group, and the busy share and rates between two samples |
 | concurrency | `mc/concurrency/cancel.h` | Cancellation token with waits and sleeps that wake on cancel |
 | | `mc/concurrency/debounce.h` | Per-key debouncing: a callback once a key has been quiet for a delay |
 | | `mc/concurrency/outbox.h` | Bytes waiting for a writer thread, with a limit that drops a peer that stopped reading |

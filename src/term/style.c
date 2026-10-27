@@ -31,6 +31,12 @@ ColorDepth color_depth_of(ColorEnvironment environment)
     if (str_contains(environment.term, S("256color"))) {
         return COLOR_DEPTH_256;
     }
+    static const char *const TRUE_COLOR_TERMS[] = { "kitty", "ghostty", "wezterm", "alacritty", "foot", "direct" };
+    for (size_t i = 0; i < countof(TRUE_COLOR_TERMS); i++) {
+        if (str_contains(environment.term, S(TRUE_COLOR_TERMS[i]))) {
+            return COLOR_DEPTH_TRUE;
+        }
+    }
     return COLOR_DEPTH_16;
 }
 
