@@ -4,10 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "nghttp2/nghttp2.h"
 
 #include "mc/net/ftp.h"
 #include "mc/net/http.h"
+#include "mc/net/http_server.h"
 #include "mc/net/smtp.h"
 #include "mc/net/tls.h"
 #include "mc/platform/platform.h"
@@ -192,78 +192,6 @@ typedef struct Server {
     Thread thread;
 } Server;
 
-// Http2Connection answers each HTTP/2 request on a connection with HTTP2_BODY.
-typedef struct Http2Connection {
-    Connection *connection;
-    String remaining;
-} Http2Connection;
-
-static const char HTTP2_BODY[] = "served over HTTP/2";
-
-static nghttp2_ssize http2_send(nghttp2_session *session, const uint8_t *data, size_t length, int flags, void *user_data)
-{
-    Http2Connection *h2 = user_data;
-    connection_send(h2->connection, (String){ (const char *)data, length });
-    return (nghttp2_ssize)length;
-}
-
-static nghttp2_ssize http2_read_body(nghttp2_session *session, int32_t stream_id, uint8_t *buffer, size_t capacity,
-                                     uint32_t *flags, nghttp2_data_source *source, void *user_data)
-{
-    String *remaining = source->ptr;
-    size_t length = min_size(capacity, remaining->len);
-    memcpy(buffer, remaining->data, length);
-    *remaining = str_slice(*remaining, length, remaining->len);
-    if (remaining->len == 0) {
-        *flags |= NGHTTP2_DATA_FLAG_EOF;
-    }
-    return (nghttp2_ssize)length;
-}
-
-// http2_on_frame answers a request once the client has sent all of it.
-static int http2_on_frame(nghttp2_session *session, const nghttp2_frame *frame, void *user_data)
-{
-    Http2Connection *h2 = user_data;
-    bool request_ends = (frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) &&
-                        (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0;
-    if (!request_ends) {
-        return 0;
-    }
-    h2->remaining = S(HTTP2_BODY);
-    const nghttp2_nv status = { (uint8_t *)":status", (uint8_t *)"200", 7, 3, NGHTTP2_NV_FLAG_NONE };
-    const nghttp2_data_provider2 body = { .source.ptr = &h2->remaining, .read_callback = http2_read_body };
-    return nghttp2_submit_response2(session, frame->hd.stream_id, &status, 1, &body);
-}
-
-// serve_http2 answers requests on a connection that negotiated HTTP/2 until the client closes it. Closing
-// first would leave the client's last frames unread, and Linux then resets the connection, discarding the
-// response before the client reads it.
-static void serve_http2(Connection *connection)
-{
-    nghttp2_session_callbacks *callbacks = nullptr;
-    nghttp2_session *session = nullptr;
-    Http2Connection h2 = { .connection = connection };
-    if (nghttp2_session_callbacks_new(&callbacks) != 0) {
-        return;
-    }
-    nghttp2_session_callbacks_set_send_callback2(callbacks, http2_send);
-    nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, http2_on_frame);
-    int created = nghttp2_session_server_new(&session, callbacks, &h2);
-    nghttp2_session_callbacks_del(callbacks);
-    if (created != 0) {
-        return;
-    }
-    (void)nghttp2_submit_settings(session, NGHTTP2_FLAG_NONE, nullptr, 0);
-    char buffer[4096];
-    while (nghttp2_session_send(session) == 0) {
-        int got = connection_receive(connection, buffer, sizeof buffer);
-        if (got <= 0 || nghttp2_session_mem_recv2(session, (const uint8_t *)buffer, (size_t)got) < 0) {
-            break;
-        }
-    }
-    nghttp2_session_del(session);
-}
-
 // start_tls runs the server's side of a TLS handshake; the connection then reads and writes through it.
 static bool start_tls(TlsServer *tls, Connection *connection)
 {
@@ -283,9 +211,7 @@ static void serve(Server *server, int client)
     Arena *arena = arena_create(0);
     Connection connection = { .fd = client };
     bool ready = server->tls == nullptr || start_tls(server->tls, &connection);
-    if (ready && connection.tls != nullptr && str_equal(tls_protocol(connection.tls), S("h2"))) {
-        serve_http2(&connection);
-    } else if (ready) {
+    if (ready) {
         connection_send(&connection, route(arena, read_request(arena, &connection)));
     }
     end_tls(&connection);
@@ -646,14 +572,16 @@ static void *accept_loop(void *argument)
     return nullptr;
 }
 
-static const String HTTP2_PROTOCOLS[] = { { "h2", 2 } };
+static const String HTTP2_ONLY[] = { { "h2", 2 } };
+static const String HTTP1_ONLY[] = { { "http/1.1", 8 } };
 
-// test_tls_server loads the test CA's certificate for the server; with http2 it offers only HTTP/2.
+// test_tls_server loads the test CA's certificate for the server. It offers
+// only HTTP/2 with http2, else only HTTP/1.1, which the test server speaks.
 static TlsServer *test_tls_server(Test *test, bool http2)
 {
     TlsServerConfig config = {
-        .protocols = http2 ? HTTP2_PROTOCOLS : nullptr,
-        .protocol_count = http2 ? countof(HTTP2_PROTOCOLS) : 0,
+        .protocols = http2 ? HTTP2_ONLY : HTTP1_ONLY,
+        .protocol_count = 1,
     };
     TlsServer *tls = nullptr;
     Err err = { 0 };
@@ -887,23 +815,39 @@ static void http_leaves_crypto_to_others_in_the_process(Test *test)
     }
 }
 
+static const char HTTP2_BODY[] = "served over HTTP/2";
+
+[[nodiscard]] static Error answer_http2(void *context, Arena *arena, const HttpServerRequest *request,
+                                        HttpServerResponse *response, Err *err)
+{
+    response->body = S(HTTP2_BODY);
+    return ERR_OK;
+}
+
+// http_speaks_http2_when_offered runs libmc's HTTP server offering only h2,
+// so the request fails unless the client speaks HTTP/2.
 static void http_speaks_http2_when_offered(Test *test)
 {
     TlsServer *tls = test_tls_server(test, true);
-    Server server;
-    test_check(test, server_start(test, &server, tls), "starts the HTTP/2 server");
+    HttpServerConfig config = { .address = S("127.0.0.1:0"), .handler = answer_http2, .tls = tls };
+    HttpServer *server = nullptr;
+    Err err = { 0 };
+    test_check(test, tls != nullptr && http_server_create(&config, &server, &err) == ERR_OK, err.msg);
+    if (server == nullptr) {
+        if (tls != nullptr) {
+            tls_server_destroy(tls);
+        }
+        return;
+    }
     HttpClient *client = local_client(test, 0, 0);
     HttpResponse response = { 0 };
-    Err err = { 0 };
-    HttpRequest request = { .url = local_url(test, &server, "https", "/") };
+    HttpRequest request = { .url = str_format(test->arena, "https://localhost:%u/", http_server_port(server)) };
     test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK, err.msg);
     test_check(test, response.status == 200, "answers 200");
     test_check_str(test, response.body, S(HTTP2_BODY), "reads a response over HTTP/2");
     http_client_destroy(client);
-    server_stop(&server);
-    if (tls != nullptr) {
-        tls_server_destroy(tls);
-    }
+    http_server_destroy(server);
+    tls_server_destroy(tls);
 }
 
 static void http_decodes_compressed_responses(Test *test)

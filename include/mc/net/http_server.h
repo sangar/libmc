@@ -9,7 +9,8 @@
 #include "mc/net/tls.h"
 #include "mc/text/str.h"
 
-// An HTTP/1.1 server for web applications, over TLS when given a TlsServer.
+// An HTTP/1.1 server for web applications, over TLS when given a TlsServer,
+// and HTTP/2 when the TLS handshake chooses it, with nghttp2.
 // Event loops own the connections and parse requests with llhttp; a pool of
 // worker threads runs the handler,
 // so a handler may block, as on a database query, without holding up other
@@ -27,7 +28,8 @@ typedef struct HttpServerRequest {
     const HttpHeader *headers;
     size_t header_count;
     String body; // decoded when chunked
-    unsigned version_minor; // HTTP/1.0 or HTTP/1.1
+    unsigned version_major; // 1, or 2 for HTTP/2
+    unsigned version_minor; // HTTP/1.0 or HTTP/1.1; 0 for HTTP/2
 } HttpServerRequest;
 
 // HttpServerResponse comes to the handler as 200 with no headers or body. The

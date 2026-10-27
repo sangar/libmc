@@ -15,7 +15,8 @@
 enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BYTES = 64 << 10, UPLOAD_BYTES = 64 << 10 };
 
 // answer echoes the method, path and body; /slow sleeps first, /fail fails,
-// and /bad-header sets a field value holding a line break.
+// /bad-header sets a field value holding a line break, and /version answers
+// the request's HTTP version.
 [[nodiscard]] static Error answer(void *context, Arena *arena, const HttpServerRequest *request,
                                   HttpServerResponse *response, Err *err)
 {
@@ -36,6 +37,10 @@ enum { SLOW_MS = 600, RECEIVE_TIMEOUT_MS = 3000, BIG_BYTES = 8 << 20, TLS_BIG_BY
         char *big = arena_push(arena, big_bytes);
         memset(big, 'x', big_bytes);
         response->body = (String){ big, big_bytes };
+        return ERR_OK;
+    }
+    if (str_equal(request->path, S("/version"))) {
+        response->body = str_format(arena, "%u.%u", request->version_major, request->version_minor);
         return ERR_OK;
     }
     response->body = str_format(arena, "%.*s %.*s %.*s", (int)request->method.len, request->method.data,
@@ -65,6 +70,13 @@ static void http_server_answers_pipelined_requests_in_order(Test *test)
                "both answered, in order");
     test_check(test, str_count_char(reply, '\n') > 0 && str_starts_with(reply, S("HTTP/1.1 200 OK\r\nDate: ")),
                "a status line and a date");
+}
+
+static void http_server_reports_the_http_version(Test *test)
+{
+    test_check(test, str_ends_with(exchange(test, S("GET /version HTTP/1.1\r\nHost: h\r\n\r\n")), S("\r\n\r\n1.1")),
+               "HTTP/1.1");
+    test_check(test, str_ends_with(exchange(test, S("GET /version HTTP/1.0\r\n\r\n")), S("\r\n\r\n1.0")), "HTTP/1.0");
 }
 
 static void http_server_refuses_ambiguous_requests(Test *test)
@@ -319,7 +331,7 @@ static void https_stop(Https *https)
 
 // http_server_serves_https makes its certificates once, does three
 // handshakes and moves a few TLS records each way, as gcc's sanitized
-// cryptography is slow.
+// cryptography is slow. libmc's client speaks HTTP/2, which TLS offers.
 static void http_server_serves_https(Test *test)
 {
     Https https;
@@ -337,6 +349,7 @@ static void http_server_serves_https(Test *test)
         .body = (String){ upload, UPLOAD_BYTES },
     };
     HttpRequest plain = { .url = str_format(test->arena, "http://localhost:%u/", port) };
+    HttpRequest version = { .url = str_format(test->arena, "https://localhost:%u/version", port) };
     HttpResponse response = { 0 };
     HttpClient *client = nullptr;
     HttpClient *other = nullptr;
@@ -344,6 +357,8 @@ static void http_server_serves_https(Test *test)
     test_check(test, https_client(https.ca_file, &client, &err) == ERR_OK, err.msg);
     test_check(test, https_client(https.other_ca_file, &other, &err) == ERR_OK, err.msg);
     if (client != nullptr && other != nullptr) {
+        test_check(test, http_send(client, test->arena, &version, &response, &err) == ERR_OK, err.msg);
+        test_check_str(test, response.body, S("2.0"), "a client that speaks HTTP/2 gets it over TLS");
         test_check(test, http_send(client, test->arena, &big, &response, &err) == ERR_OK, err.msg);
         test_check(test, response.body.len == TLS_BIG_BYTES, "more than a TLS record comes back");
         test_check(test, http_send(client, test->arena, &post, &response, &err) == ERR_OK, err.msg);
@@ -401,6 +416,7 @@ static void http_server_finishes_requests_when_stopped(Test *test)
 
 const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_answers_pipelined_requests_in_order", http_server_answers_pipelined_requests_in_order },
+    { "http_server_reports_the_http_version", http_server_reports_the_http_version },
     { "http_server_refuses_ambiguous_requests", http_server_refuses_ambiguous_requests },
     { "http_server_answers_500_for_failures", http_server_answers_500_for_failures },
     { "http_server_continues_and_answers_head", http_server_continues_and_answers_head },
