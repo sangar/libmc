@@ -40,6 +40,16 @@ struct Http1 {
     bool in_trailer;
     size_t extension_name_bytes;
     bool awaiting_response;
+    Http1BodySink sink; // streams bodies when set
+    void *sink_context;
+    bool has_body;
+    bool body_ended;
+    bool continue_sent;
+    bool responding;       // a response has started
+    bool response_body;    // it has a body: not for HEAD, 204 or 304
+    bool chunked_response; // its body goes in chunks
+    bool keep_alive;
+    Http1Event pause_event; // what the parser paused for
 };
 
 static bool method_served(String method)
@@ -161,20 +171,40 @@ static bool status_has_body(unsigned status)
     return status != 204 && status != 304;
 }
 
-static void append_response(Http1 *http, const HttpServerResponse *response, bool keep_alive)
+// output_ready starts the output afresh once all of it was taken, so a
+// streamed response does not grow it without end.
+static void output_ready(Http1 *http)
 {
-    String reason = reason_phrase(response->status);
-    str_builder_append_format(&http->output, "HTTP/1.1 %u %.*s\r\n", response->status, (int)reason.len, reason.data);
+    if (http->taken == http->output.len) {
+        http->output.len = 0;
+        http->taken = 0;
+    }
+}
+
+static void append_head(Http1 *http, unsigned status, const HttpHeader *headers, size_t header_count,
+                        int64_t content_length, bool keep_alive)
+{
+    String reason = reason_phrase(status);
+    str_builder_append_format(&http->output, "HTTP/1.1 %u %.*s\r\n", status, (int)reason.len, reason.data);
     append_date(&http->output);
-    for (size_t i = 0; i < response->header_count; i++) {
-        HttpHeader header = response->headers[i];
+    for (size_t i = 0; i < header_count; i++) {
+        HttpHeader header = headers[i];
         str_builder_append_format(&http->output, "%.*s: %.*s\r\n", (int)header.name.len, header.name.data,
                                   (int)header.value.len, header.value.data);
     }
-    if (status_has_body(response->status)) {
-        str_builder_append_format(&http->output, "Content-Length: %zu\r\n", response->body.len);
+    if (status_has_body(status) && content_length >= 0) {
+        str_builder_append_format(&http->output, "Content-Length: %lld\r\n", (long long)content_length);
+    } else if (status_has_body(status) && http->chunked_response) {
+        str_builder_append(&http->output, S("Transfer-Encoding: chunked\r\n"));
     }
     str_builder_append_format(&http->output, "Connection: %s\r\n\r\n", keep_alive ? "keep-alive" : "close");
+}
+
+static void append_response(Http1 *http, const HttpServerResponse *response, bool keep_alive)
+{
+    http->chunked_response = false;
+    append_head(http, response->status, response->headers, response->header_count, (int64_t)response->body.len,
+                keep_alive);
     if (llhttp_get_method(&http->parser) != HTTP_HEAD && status_has_body(response->status)) {
         str_builder_append(&http->output, response->body);
     }
@@ -182,6 +212,7 @@ static void append_response(Http1 *http, const HttpServerResponse *response, boo
 
 static void append_rejection(Http1 *http, String reason)
 {
+    output_ready(http);
     unsigned status = http->reject_status != 0 ? http->reject_status : 400;
     HttpHeader content_type = { S("Content-Type"), S("text/plain") };
     HttpServerResponse response = {
@@ -228,6 +259,9 @@ static int on_message_begin(llhttp_t *parser)
     http->expects_continue = false;
     http->header_bytes = 0;
     http->body_bytes = 0;
+    http->has_body = false;
+    http->body_ended = false;
+    http->continue_sent = false;
     return 0;
 }
 
@@ -297,6 +331,26 @@ static int on_header_value_complete(llhttp_t *parser)
     return 0;
 }
 
+static void fill_request(Http1 *http, String body)
+{
+    llhttp_t *parser = &http->parser;
+    String target = str_builder_finish(&http->url);
+    String path = target;
+    String query = { 0 };
+    str_cut(target, '?', &path, &query);
+    http->request = (HttpServerRequest){
+        .method = S(llhttp_method_name((llhttp_method_t)llhttp_get_method(parser))),
+        .target = target,
+        .path = path,
+        .query = query,
+        .headers = http->headers,
+        .header_count = http->header_count,
+        .body = body,
+        .version_major = parser->http_major,
+        .version_minor = parser->http_minor,
+    };
+}
+
 // on_headers_complete requires a served method, HTTP/1, one Host, which HTTP/1.1
 // makes mandatory (RFC 9112 3.2), and no transfer coding but a single chunked;
 // llhttp joins repeated fields into one list. HTTP/1.0 has no transfer
@@ -321,13 +375,18 @@ static int on_headers_complete(llhttp_t *parser)
     if (http->transfer_encoding_count > 0 && !(http->transfer_encoding_count == 1 && http->chunked)) {
         return reject(http, 501);
     }
+    http->has_body = http->chunked || parser->content_length > 0;
+    if (http->sink != nullptr && http->has_body) {
+        // The request goes to the handler now, and its body as it comes.
+        fill_request(http, (String){ 0 });
+        http->awaiting_response = true;
+        http->pause_event = HTTP1_REQUEST;
+        return HPE_PAUSED;
+    }
     if (parser->content_length > http->limits.max_body_bytes) {
         return reject(http, 413);
     }
-    bool has_body = http->chunked || parser->content_length > 0;
-    if (http->expects_continue && host_required && has_body) {
-        str_builder_append(&http->output, S("HTTP/1.1 100 Continue\r\n\r\n"));
-    }
+    http1_continue(http);
     return 0;
 }
 
@@ -350,6 +409,10 @@ static int on_chunk_extension_name_complete(llhttp_t *parser)
 static int on_body(llhttp_t *parser, const char *at, size_t length)
 {
     Http1 *http = parser->data;
+    if (http->sink != nullptr) {
+        http->sink(http->sink_context, (String){ at, length });
+        return 0;
+    }
     http->body_bytes += length;
     if (http->body_bytes > http->limits.max_body_bytes) {
         return reject(http, 413);
@@ -358,30 +421,21 @@ static int on_body(llhttp_t *parser, const char *at, size_t length)
     return 0;
 }
 
-// on_message_complete holds the request and pauses the parser, so
-// http1_feed sees where the next request starts.
+// on_message_complete holds the request, or ends a streamed body, and pauses
+// the parser, so http1_feed sees where the next request starts.
 static int on_message_complete(llhttp_t *parser)
 {
     Http1 *http = parser->data;
-    String target = str_builder_finish(&http->url);
-    String path = target;
-    String query = { 0 };
-    str_cut(target, '?', &path, &query);
-    http->request = (HttpServerRequest){
-        .method = S(llhttp_method_name((llhttp_method_t)llhttp_get_method(parser))),
-        .target = target,
-        .path = path,
-        .query = query,
-        .headers = http->headers,
-        .header_count = http->header_count,
-        .body = str_builder_finish(&http->body),
-        .version_major = parser->http_major,
-        .version_minor = parser->http_minor,
-    };
-    http->closing = llhttp_should_keep_alive(parser) != 1;
+    bool streamed = http->awaiting_response;
+    if (!streamed) {
+        fill_request(http, str_builder_finish(&http->body));
+    }
+    http->closing = http->closing || llhttp_should_keep_alive(parser) != 1;
     http->awaiting_response = true;
+    http->body_ended = true;
     http->between_messages = true;
     http->line_end_bytes = 0;
+    http->pause_event = streamed ? HTTP1_BODY_END : HTTP1_REQUEST;
     return HPE_PAUSED;
 }
 
@@ -400,7 +454,7 @@ static const llhttp_settings_t SETTINGS = {
     .on_message_complete = on_message_complete,
 };
 
-Http1 *http1_create(HttpServerLimits limits)
+Http1 *http1_create(HttpServerLimits limits, Http1BodySink sink, void *sink_context)
 {
     Arena *arena = arena_create(0);
     Http1 *http = arena_push(arena, sizeof *http);
@@ -409,6 +463,8 @@ Http1 *http1_create(HttpServerLimits limits)
         .request_arena = arena_create(0),
         .limits = limits,
         .between_messages = true,
+        .sink = sink,
+        .sink_context = sink_context,
     };
     http->output = str_builder_create(http->request_arena, OUTPUT_CAPACITY);
     llhttp_init(&http->parser, HTTP_REQUEST, &SETTINGS);
@@ -437,16 +493,24 @@ static bool skip_empty_line(Http1 *http, String data)
     return i == data.len || http->line_end_bytes != 1;
 }
 
+// rejectable says whether a refusal can still be the answer: not once the
+// request went to a handler, whose response it would cut into.
+static bool rejectable(const Http1 *http)
+{
+    return !http->awaiting_response;
+}
+
 Http1Event http1_feed(Http1 *http, String data, size_t *used)
 {
-    assert(!http->awaiting_response && !http->closing);
+    assert((!http->awaiting_response || !http->body_ended) && !http->closing);
     *used = data.len;
     // Between requests llhttp is still paused at the last one, where a close is no error.
     if (data.len == 0) {
         llhttp_errno_t result = http->between_messages ? HPE_OK : llhttp_finish(&http->parser);
-        if (result != HPE_OK) {
+        if (result != HPE_OK && rejectable(http)) {
             append_rejection(http, S(llhttp_errno_name(result)));
         }
+        http->closing = true;
         return HTTP1_CLOSE;
     }
     if (http->between_messages && !skip_empty_line(http, data)) {
@@ -460,12 +524,28 @@ Http1Event http1_feed(Http1 *http, String data, size_t *used)
     if (result == HPE_PAUSED) {
         *used = (size_t)(llhttp_get_error_pos(&http->parser) - data.data);
         llhttp_resume(&http->parser);
-        return HTTP1_REQUEST;
+        return http->pause_event;
     }
-    if (result != HPE_PAUSED_UPGRADE) {
+    if (result != HPE_PAUSED_UPGRADE && rejectable(http)) {
         append_rejection(http, S(llhttp_errno_name(result)));
     }
+    http->closing = true;
     return HTTP1_CLOSE;
+}
+
+bool http1_body_complete(const Http1 *http)
+{
+    return http->body_ended;
+}
+
+void http1_continue(Http1 *http)
+{
+    bool asked = http->expects_continue && http->has_body && http->parser.http_minor >= 1;
+    if (asked && !http->continue_sent && !http->responding) {
+        output_ready(http);
+        str_builder_append(&http->output, S("HTTP/1.1 100 Continue\r\n\r\n"));
+        http->continue_sent = true;
+    }
 }
 
 const HttpServerRequest *http1_request(const Http1 *http)
@@ -479,14 +559,14 @@ Arena *http1_arena(Http1 *http)
     return http->request_arena;
 }
 
-static bool response_valid(const HttpServerResponse *response)
+bool http1_fields_valid(unsigned status, const HttpHeader *headers, size_t header_count)
 {
-    assert(response->status >= 200 && response->status <= 599);
-    for (size_t i = 0; i < response->header_count; i++) {
-        String name = response->headers[i].name;
+    assert(status >= 200 && status <= 599);
+    for (size_t i = 0; i < header_count; i++) {
+        String name = headers[i].name;
         assert(!str_equal_ignore_case(name, S("Content-Length")) && !str_equal_ignore_case(name, S("Connection")) &&
                !str_equal_ignore_case(name, S("Transfer-Encoding")) && !str_equal_ignore_case(name, S("Date")));
-        if (!field_name_valid(name) || !field_value_valid(response->headers[i].value)) {
+        if (!field_name_valid(name) || !field_value_valid(headers[i].value)) {
             return false;
         }
     }
@@ -495,14 +575,61 @@ static bool response_valid(const HttpServerResponse *response)
 
 bool http1_respond(Http1 *http, const HttpServerResponse *response, bool close)
 {
-    assert(http->awaiting_response);
+    assert(http->awaiting_response && !http->responding);
     http->awaiting_response = false;
     static const HttpServerResponse FAILED = { .status = 500 };
-    if (response == nullptr || !response_valid(response)) {
+    if (response == nullptr || !http1_fields_valid(response->status, response->headers, response->header_count)) {
         response = &FAILED;
     }
     bool keep_alive = !close && !http->closing;
+    output_ready(http);
     append_response(http, response, keep_alive);
+    http->closing = !keep_alive;
+    return keep_alive;
+}
+
+void http1_start(Http1 *http, unsigned status, const HttpHeader *headers, size_t header_count, int64_t content_length,
+                 bool close)
+{
+    assert(http->awaiting_response && !http->responding && http1_fields_valid(status, headers, header_count));
+    bool http_1_1 = http->parser.http_minor >= 1;
+    http->responding = true;
+    http->response_body = llhttp_get_method(&http->parser) != HTTP_HEAD && status_has_body(status);
+    http->chunked_response = content_length < 0 && http_1_1;
+    // HTTP/1.0 has no chunks, so a body of unknown length ends with the
+    // connection, as does a response begun before the request's body was read.
+    http->keep_alive = !close && !http->closing && http->body_ended &&
+                       (content_length >= 0 || http_1_1 || !status_has_body(status));
+    output_ready(http);
+    append_head(http, status, headers, header_count, content_length, http->keep_alive);
+}
+
+void http1_write(Http1 *http, String data)
+{
+    assert(http->responding);
+    if (!http->response_body || data.len == 0) {
+        return;
+    }
+    output_ready(http);
+    if (http->chunked_response) {
+        str_builder_append_format(&http->output, "%zx\r\n", data.len);
+    }
+    str_builder_append(&http->output, data);
+    if (http->chunked_response) {
+        str_builder_append(&http->output, S("\r\n"));
+    }
+}
+
+bool http1_end(Http1 *http, bool complete)
+{
+    assert(http->responding);
+    if (http->response_body && http->chunked_response && complete) {
+        output_ready(http);
+        str_builder_append(&http->output, S("0\r\n\r\n"));
+    }
+    http->responding = false;
+    http->awaiting_response = false;
+    bool keep_alive = http->keep_alive && complete;
     http->closing = !keep_alive;
     return keep_alive;
 }

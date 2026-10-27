@@ -50,15 +50,56 @@ typedef struct HttpServerResponse {
 typedef Error (*HttpHandler)(void *context, Arena *arena, const HttpServerRequest *request,
                              HttpServerResponse *response, Err *err);
 
+// HttpExchange is one request whose body and response stream, for a handler
+// that reads an upload as it arrives or sends a body it never holds whole.
+// Its functions are for the handler's thread, until the handler returns.
+typedef struct HttpExchange HttpExchange;
+
+// HttpStreamHandler answers the request in exchange: it may read the body
+// with http_exchange_read, then starts the response with http_exchange_start
+// and sends its body with http_exchange_write. Returning without starting is
+// answered with an empty 500, as is an error before starting; an error after
+// it, or a body shorter than announced, ends the connection on HTTP/1.1 or
+// resets the stream on HTTP/2, so the client sees the response was cut short.
+typedef Error (*HttpStreamHandler)(void *context, HttpExchange *exchange, Err *err);
+
+// http_exchange_request is the request with an empty body.
+const HttpServerRequest *http_exchange_request(const HttpExchange *exchange);
+// http_exchange_arena is the handler's to allocate from until it returns.
+Arena *http_exchange_arena(HttpExchange *exchange);
+
+// http_exchange_read waits for the next piece of the body, stores up to
+// capacity bytes of it in buffer and their count in *got, which is 0 once the
+// body has ended. The first read tells a client that sent Expect:
+// 100-continue to send the body, so a handler can refuse an upload unread.
+// Fails with ERR_NETWORK when the client went away and ERR_PARSE when it
+// framed the body wrongly. Until it is read, the client is held back.
+[[nodiscard]] Error http_exchange_read(HttpExchange *exchange, char *buffer, size_t capacity, size_t *got, Err *err);
+
+// http_exchange_start sends the response's head: status and headers as
+// HttpServerResponse takes them, with a body of content_length bytes, or of a
+// length not known yet when it is negative, which goes chunked on HTTP/1.1 and
+// until the connection closes on HTTP/1.0. HEAD, 204 and 304 get the head
+// alone, with Content-Length still as given. A field that cannot go out fails
+// with ERR_INVALID_ARGUMENT and starts nothing.
+[[nodiscard]] Error http_exchange_start(HttpExchange *exchange, unsigned status, const HttpHeader *headers,
+                                        size_t header_count, int64_t content_length, Err *err);
+// http_exchange_write sends data as the next piece of the body, waiting
+// while the client is slow to read. More than content_length fails with
+// ERR_INVALID_ARGUMENT, and a client gone with ERR_NETWORK; a response
+// without a body drops it.
+[[nodiscard]] Error http_exchange_write(HttpExchange *exchange, String data, Err *err);
+
 // HttpServerLimits bound what a client can make the server hold. Zero takes
 // the default beside each field.
 typedef struct HttpServerLimits {
     size_t max_header_bytes; // request line and fields: 8 KiB, else 431 or 414
-    size_t max_body_bytes;   // 1 MiB, else 413
+    size_t max_body_bytes;   // 1 MiB, else 413; streamed bodies have no limit
     size_t max_connections;  // 1024; more wait in the listen backlog
     // timeout_ms bounds each wait on the client: from the connection or the
-    // last response to a complete request, and between bytes of a response
-    // the client is slow to read: 30 s. A handler has no limit.
+    // last response to a complete request, between bytes of a streamed body
+    // on HTTP/1.1, and between bytes of a response the client is slow to
+    // read: 30 s. A handler has no limit.
     int64_t timeout_ms;
 } HttpServerLimits;
 
@@ -86,6 +127,9 @@ typedef struct HttpServerConfig {
     size_t loop_count;   // event loop threads: 1
     size_t worker_count; // handler threads: one per CPU
     HttpHandler handler;
+    // stream_handler, when set, answers every request instead of handler.
+    // Responses it sends are not compressed.
+    HttpStreamHandler stream_handler;
     void *context;
     // tls, when set, serves every connection over TLS with it; the server
     // borrows it until http_server_destroy. http_server_exchange ignores it.
@@ -103,7 +147,7 @@ uint16_t http_server_port(const HttpServer *server);
 // already started finish within the timeout, and waits for their handlers.
 void http_server_destroy(HttpServer *server);
 
-// http_server_exchange runs config's handler on this thread, with no socket,
+// http_server_exchange runs config's handler, not a stream_handler, on this thread, with no socket,
 // for one connection on which a client sends each piece in turn and then
 // closes. *answer is every byte the server answered, in arena.
 [[nodiscard]] Error http_server_exchange(Arena *arena, const HttpServerConfig *config, StringList pieces,
