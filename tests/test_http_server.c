@@ -220,6 +220,46 @@ static void http_server_refuses_ambiguous_requests(Test *test)
     test_check(test, str_starts_with(reply, S("HTTP/1.1 431 ")), "a header over the limit");
 }
 
+static void http_fields_read_and_write(Test *test)
+{
+    Arena *a = test->arena;
+    test_check_str(test, http_date(a, 784111777LL * NS_PER_SECOND), S("Sun, 06 Nov 1994 08:49:37 GMT"),
+                   "RFC 9110's example date");
+    test_check_str(test, http_date(a, -1), S("Wed, 31 Dec 1969 23:59:59 GMT"), "a moment before 1970");
+    const HttpHeader headers[] = { { S("Content-Type"), S("text/plain") }, { S("X-A"), S("1") }, { S("x-a"), S("2") } };
+    String value = S("");
+    test_check(test, http_header_find(headers, countof(headers), S("x-A"), &value) && str_equal(value, S("1")),
+               "the first field of a name in any case");
+    test_check(test, !http_header_find(headers, countof(headers), S("X-B"), &value), "a missing field");
+
+    String query = S("prefix=bl%C3%A5+b%C3%A6r&uploads&max-keys=10&100%=x");
+    test_check(test, http_query_param(a, query, S("prefix"), &value) && str_equal(value, S("blå bær")),
+               "a value decoded, '+' a space");
+    test_check(test, http_query_param(a, query, S("uploads"), &value) && value.len == 0, "a parameter with no value");
+    test_check(test, http_query_param(a, query, S("100%"), &value) && str_equal(value, S("x")),
+               "a '%' that begins no escape stays");
+    test_check(test, !http_query_param(a, query, S("max"), &value) && !http_query_param(a, S(""), S("a"), &value),
+               "missing parameters");
+
+    int64_t first = 0;
+    int64_t last = 0;
+    test_check(test, http_parse_range(S("bytes=0-4"), 11, &first, &last) == HTTP_RANGE_SATISFIABLE && first == 0 && last == 4,
+               "the first five bytes");
+    test_check(test, http_parse_range(S("bytes=6-"), 11, &first, &last) == HTTP_RANGE_SATISFIABLE && first == 6 && last == 10,
+               "an open end");
+    test_check(test, http_parse_range(S("bytes=-5"), 11, &first, &last) == HTTP_RANGE_SATISFIABLE && first == 6 && last == 10,
+               "a suffix");
+    test_check(test, http_parse_range(S("bytes=-50"), 11, &first, &last) == HTTP_RANGE_SATISFIABLE && first == 0 && last == 10,
+               "a suffix longer than the body");
+    test_check(test, http_parse_range(S("bytes=5-100"), 11, &first, &last) == HTTP_RANGE_SATISFIABLE && last == 10,
+               "an end past the body is cut");
+    test_check(test, http_parse_range(S("bytes=11-"), 11, &first, &last) == HTTP_RANGE_UNSATISFIABLE, "a start past the end");
+    test_check(test, http_parse_range(S("bytes=-0"), 11, &first, &last) == HTTP_RANGE_UNSATISFIABLE, "an empty suffix");
+    test_check(test, http_parse_range(S("bytes=0-1,4-5"), 11, &first, &last) == HTTP_RANGE_NONE, "several ranges");
+    test_check(test, http_parse_range(S("items=0-1"), 11, &first, &last) == HTTP_RANGE_NONE, "another unit");
+    test_check(test, http_parse_range(S("bytes=4-1"), 11, &first, &last) == HTTP_RANGE_NONE, "an end before the start");
+}
+
 static void http_server_answers_500_for_failures(Test *test)
 {
     test_check(test, str_starts_with(exchange(test, S("GET /fail HTTP/1.1\r\nHost: h\r\n\r\n")), S("HTTP/1.1 500 ")),
@@ -722,6 +762,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_reports_the_http_version", http_server_reports_the_http_version },
     { "http_server_refuses_ambiguous_requests", http_server_refuses_ambiguous_requests },
     { "http_server_gzips_what_is_worth_it", http_server_gzips_what_is_worth_it },
+    { "http_fields_read_and_write", http_fields_read_and_write },
     { "http_server_answers_500_for_failures", http_server_answers_500_for_failures },
     { "http_server_continues_and_answers_head", http_server_continues_and_answers_head },
     { "http_server_serves_the_http_client", http_server_serves_the_http_client },

@@ -142,16 +142,6 @@ static bool file_for(const StaticFiles *files, Arena *arena, String request_path
     return info->is_regular && info->size >= 0 && (size_t)info->size <= files->config.max_file_bytes;
 }
 
-static String request_header(const HttpServerRequest *request, String name)
-{
-    for (size_t i = 0; i < request->header_count; i++) {
-        if (str_equal_ignore_case(request->headers[i].name, name)) {
-            return request->headers[i].value;
-        }
-    }
-    return S("");
-}
-
 // matches says whether If-None-Match names etag, or is * (RFC 9110 13.1.2),
 // comparing weakly as a GET may.
 static bool matches(Arena *arena, String if_none_match, String etag)
@@ -292,7 +282,8 @@ bool static_files_serve(StaticFiles *files, Arena *arena, const HttpServerReques
     if (http_compressible(type)) {
         add_header(arena, response, "Vary", S("Accept-Encoding"));
     }
-    String if_none_match = request_header(request, S("If-None-Match"));
+    String if_none_match = S("");
+    http_header_find(request->headers, request->header_count, S("If-None-Match"), &if_none_match);
     if (if_none_match.len > 0 && matches(arena, if_none_match, etag)) {
         response->status = 304;
         return true;
