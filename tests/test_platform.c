@@ -275,6 +275,24 @@ static void processes_stream_more_than_a_pipe_holds(Test *test)
     test_check(test, signal(SIGPIPE, inherited) == SIG_DFL, "the process keeps its SIGPIPE handling");
 }
 
+static void processes_time_out_with_their_children(Test *test)
+{
+    Arena *a = test->arena;
+    Err err = { 0 };
+    ProcessResult result;
+    const char *const quick[] = { "sh", "-c", "echo done" };
+    test_check(test, process_run_timeout(a, strlist_of(a, countof(quick), quick), S(""), 5000, &result, &err) == ERR_OK,
+               "a child that finishes in time runs");
+    test_check_str(test, result.stdout_text, S("done\n"), "its output comes back");
+
+    // The grandchild holds stdout open, so only killing the whole group ends the wait.
+    const char *const slow[] = { "sh", "-c", "sleep 30 | cat" };
+    int64_t started = clock_monotonic_ns();
+    test_check(test, process_run_timeout(a, strlist_of(a, countof(slow), slow), S(""), 200, &result, &err) == ERR_TIMEOUT,
+               "a child that runs too long is ERR_TIMEOUT");
+    test_check(test, clock_monotonic_ns() - started < 5000000000, "the timeout ends the wait");
+}
+
 static void environment_reads_and_writes(Test *test)
 {
     Arena *a = test->arena;
@@ -978,6 +996,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "look_path_survives_long_entries", look_path_survives_long_entries },
     { "processes_capture_output_and_status", processes_capture_output_and_status },
     { "processes_stream_more_than_a_pipe_holds", processes_stream_more_than_a_pipe_holds },
+    { "processes_time_out_with_their_children", processes_time_out_with_their_children },
     { "environment_reads_and_writes", environment_reads_and_writes },
     { "processes_take_signals_and_limits", processes_take_signals_and_limits },
     { "threads_share_state_under_a_mutex", threads_share_state_under_a_mutex },
