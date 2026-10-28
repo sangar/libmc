@@ -26,6 +26,7 @@ static const HttpServerLimits DEFAULT_LIMITS = {
     .max_body_bytes = 1 << 20,
     .max_connections = 1024,
     .timeout_ms = 30000,
+    .request_timeout_ms = 60000,
 };
 
 typedef struct Loop Loop;
@@ -51,7 +52,8 @@ struct Connection {
     size_t lingered;
     bool peer_closed;
     bool closed;
-    int64_t deadline_ns; // 0 while the handler runs
+    int64_t deadline_ns;         // 0 while the handler runs
+    int64_t request_deadline_ns; // absolute cap on receiving one request; 0 between requests
     Connection *previous;
     Connection *next;
 };
@@ -129,6 +131,11 @@ struct HttpServer {
 static int64_t timeout_ns(const Loop *loop)
 {
     return loop->server->config.limits.timeout_ms * NS_PER_MS;
+}
+
+static int64_t request_timeout_ns(const Loop *loop)
+{
+    return loop->server->config.limits.request_timeout_ms * NS_PER_MS;
 }
 
 static void connection_close(Connection *connection)
@@ -358,6 +365,10 @@ static bool receive_input(Connection *connection)
     switch (connection_receive(connection, &got)) {
     case TLS_DONE:
         connection->pending = (String){ connection->input, got };
+        if (connection->request_deadline_ns == 0) {
+            // First byte of a request: start the absolute cap on receiving it.
+            connection->request_deadline_ns = clock_monotonic_ns() + request_timeout_ns(connection->loop);
+        }
         if (connection->in_flight > 0 && connection->http != nullptr) {
             // A streamed body may take long; only a pause in it is too long.
             connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
@@ -563,6 +574,7 @@ static void exchange_free(HttpExchange *exchange)
     connection->in_flight--;
     if (connection->in_flight == 0) {
         connection->deadline_ns = clock_monotonic_ns() + timeout_ns(connection->loop);
+        connection->request_deadline_ns = 0;
     }
     mutex_destroy(&exchange->mutex);
     cond_destroy(&exchange->changed);
@@ -758,6 +770,7 @@ static void respond(HttpExchange *exchange)
     }
     if (connection->in_flight == 0) {
         connection->deadline_ns = clock_monotonic_ns() + timeout_ns(loop);
+        connection->request_deadline_ns = 0;
     }
     connection_advance(connection);
 }
@@ -817,7 +830,13 @@ static void close_expired(Loop *loop)
     Connection *next = nullptr;
     for (Connection *connection = loop->connections; connection != nullptr; connection = next) {
         next = connection->next;
-        if (connection->deadline_ns != 0 && now >= connection->deadline_ns) {
+        bool idle_expired = connection->deadline_ns != 0 && now >= connection->deadline_ns;
+        // The absolute request cap applies only while bytes are still coming in,
+        // which is when the idle deadline runs too; a handler (deadline_ns == 0)
+        // is never timed out by it.
+        bool request_expired = connection->deadline_ns != 0 && connection->request_deadline_ns != 0 &&
+                               now >= connection->request_deadline_ns;
+        if (idle_expired || request_expired) {
             connection_close(connection);
         }
     }
@@ -858,6 +877,8 @@ static HttpServerConfig config_with_defaults(Arena *arena, const HttpServerConfi
     limits->max_body_bytes = limits->max_body_bytes != 0 ? limits->max_body_bytes : DEFAULT_LIMITS.max_body_bytes;
     limits->max_connections = limits->max_connections != 0 ? limits->max_connections : DEFAULT_LIMITS.max_connections;
     limits->timeout_ms = limits->timeout_ms > 0 ? limits->timeout_ms : DEFAULT_LIMITS.timeout_ms;
+    limits->request_timeout_ms =
+        limits->request_timeout_ms > 0 ? limits->request_timeout_ms : DEFAULT_LIMITS.request_timeout_ms;
     resolved.loop_count = resolved.loop_count != 0 ? resolved.loop_count : 1;
     if (config->compression != nullptr) {
         HttpCompression *compression = arena_push(arena, sizeof *compression);

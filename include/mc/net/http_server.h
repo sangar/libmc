@@ -121,6 +121,11 @@ typedef struct HttpServerLimits {
     // on HTTP/1.1, and between bytes of a response the client is slow to
     // read: 30 s. A handler has no limit.
     int64_t timeout_ms;
+    // request_timeout_ms bounds a whole request's receipt, from its first byte
+    // to its last. timeout_ms resets on every byte, so a client dripping one
+    // byte under it holds a connection open forever; this is the absolute cap
+    // that closes it: 60 s. A handler's own time does not count against it.
+    int64_t request_timeout_ms;
 } HttpServerLimits;
 
 // HttpCompression is how a server gzips responses, after Basecamp's
