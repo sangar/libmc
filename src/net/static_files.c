@@ -116,8 +116,24 @@ static String content_type(String path)
     return S("application/octet-stream");
 }
 
+// under_root reports whether the canonical path stays within the canonical
+// root, so a symlink inside root cannot serve a file outside it. path_clean on
+// the request only stops .. at the virtual root; a symlink escapes that, which
+// only resolving the real path and comparing catches.
+static bool under_root(Arena *arena, String root, String path)
+{
+    String real_root = { 0 };
+    String real_path = { 0 };
+    if (path_resolve(arena, root, &real_root, nullptr) != ERR_OK ||
+        path_resolve(arena, path, &real_path, nullptr) != ERR_OK) {
+        return false;
+    }
+    return str_equal(real_path, real_root) ||
+           str_starts_with(real_path, str_format(arena, "%.*s/", (int)real_root.len, real_root.data));
+}
+
 // file_for maps the request's path to a file under root: decoded, cleaned so
-// .. stops at root, and a directory's index.html.
+// .. stops at root, a directory's index.html, and the real path kept in root.
 static bool file_for(const StaticFiles *files, Arena *arena, String request_path, String *path, FileInfo *info)
 {
     String prefix = files->config.prefix;
@@ -135,11 +151,12 @@ static bool file_for(const StaticFiles *files, Arena *arena, String request_path
     }
     if (info->is_dir) {
         *path = path_join(arena, *path, S("index.html"));
-        if (file_info_follow(*path, info, nullptr) != ERR_OK) {
+        if (file_info_follow(*path, info, nullptr) != ERR_OK || !info->exists) {
             return false;
         }
     }
-    return info->is_regular && info->size >= 0 && (size_t)info->size <= files->config.max_file_bytes;
+    return info->is_regular && info->size >= 0 && (size_t)info->size <= files->config.max_file_bytes &&
+           under_root(arena, files->config.root, *path);
 }
 
 // matches says whether If-None-Match names etag, or is * (RFC 9110 13.1.2),
