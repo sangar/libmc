@@ -9,7 +9,7 @@
 static const Rgb WHITE = { 255, 255, 255 };
 static const Rgb BLACK = { 0, 0, 0 };
 
-static String render(Test *test, Screen *screen)
+static String render_screen(Test *test, Screen *screen)
 {
     StringBuilder out = str_builder_create(test->arena, 256);
     screen_render(screen, &out);
@@ -27,22 +27,22 @@ static void screen_writes_only_what_changed(Test *test)
     Screen *screen = screen_create(COLOR_DEPTH_TRUE);
     screen_resize(screen, 4, 2);
     draw_text(screen, "ab");
-    String first = render(test, screen);
+    String first = render_screen(test, screen);
     test_check(test, str_contains(first, S("ab")) && str_contains(first, S("38;2;255;255;255")),
                "the first frame paints everything in true colour");
     draw_text(screen, "ac");
-    String second = render(test, screen);
+    String second = render_screen(test, screen);
     test_check(test, str_starts_with(second, S("\x1b[1;2H")) && str_ends_with(second, S("c")) &&
                          !str_contains(second, S("a")),
                "the next frame moves to the changed cell and writes it");
     draw_text(screen, "ac");
-    test_check(test, render(test, screen).len == 0, "an unchanged frame writes nothing");
+    test_check(test, render_screen(test, screen).len == 0, "an unchanged frame writes nothing");
     screen_destroy(screen);
 
     screen = screen_create(COLOR_DEPTH_256);
     screen_resize(screen, 2, 1);
     draw_text(screen, "x");
-    test_check(test, str_contains(render(test, screen), S("38;5;231")), "the 256-colour palette");
+    test_check(test, str_contains(render_screen(test, screen), S("38;5;231")), "the 256-colour palette");
     screen_destroy(screen);
 }
 

@@ -17,7 +17,7 @@
 // mc/net/sigv4_verify.h; set LIBMC_S3_ENDPOINT and LIBMC_S3_BUCKET, with credentials as
 // s3_credentials_from_environment finds them, to also run against a real store.
 
-enum { ACCEPT_POLL_MS = 50, MAX_OBJECTS = 32, MAX_PARTS = 16, LIST_PAGE = 2 };
+enum { MAX_OBJECTS = 32, MAX_PARTS = 16, LIST_PAGE = 2 };
 
 static const char BUCKET[] = "bucket";
 static const char ACCESS_KEY[] = "AKIDTEST";
@@ -79,7 +79,7 @@ static bool read_exactly(int fd, char *buffer, size_t length)
     return true;
 }
 
-static bool header_value(String head, const char *name, String *value)
+static bool request_header_value(String head, const char *name, String *value)
 {
     String rest = head;
     while (rest.len > 0) {
@@ -95,8 +95,8 @@ static bool header_value(String head, const char *name, String *value)
     return false;
 }
 
-// read_request reads the head, answers Expect: 100-continue, then reads a Content-Length body.
-static bool read_request(Arena *arena, int fd, FakeRequest *request)
+// read_fake_request reads the head, answers Expect: 100-continue, then reads a Content-Length body.
+static bool read_fake_request(Arena *arena, int fd, FakeRequest *request)
 {
     StringBuilder head = str_builder_create(arena, 1024);
     while (!str_ends_with((String){ head.data, head.len }, S("\r\n\r\n"))) {
@@ -115,10 +115,10 @@ static bool read_request(Arena *arena, int fd, FakeRequest *request)
     str_cut(target, '?', &request->path, &request->query);
     String value = { 0 };
     uint64_t length = 0;
-    if (header_value(request->head, "Expect", &value) && str_equal_ignore_case(value, S("100-continue"))) {
+    if (request_header_value(request->head, "Expect", &value) && str_equal_ignore_case(value, S("100-continue"))) {
         (void)net_send(fd, S("HTTP/1.1 100 Continue\r\n\r\n"), nullptr);
     }
-    if (header_value(request->head, "Content-Length", &value) && str_parse_u64(value, &length) && length > 0) {
+    if (request_header_value(request->head, "Content-Length", &value) && str_parse_u64(value, &length) && length > 0) {
         char *body = arena_push(arena, (size_t)length + 1);
         if (!read_exactly(fd, body, (size_t)length)) {
             return false;
@@ -165,7 +165,7 @@ static bool parameter(Arena *arena, String query, const char *name, String *valu
     return false;
 }
 
-static String reply(Arena *arena, int status, String headers, String body)
+static String fake_reply(Arena *arena, int status, String headers, String body)
 {
     return str_format(arena, "HTTP/1.1 %d Fake\r\nContent-Length: %zu\r\nConnection: close\r\n%.*s\r\n%.*s", status,
                       body.len, (int)headers.len, headers.data, (int)body.len, body.data);
@@ -175,7 +175,7 @@ static String error_reply(Arena *arena, int status, const char *code)
 {
     String body = str_format(arena, "<?xml version=\"1.0\"?><Error><Code>%s</Code><Message>%s happened</Message></Error>",
                              code, code);
-    return reply(arena, status, S("Content-Type: application/xml\r\n"), body);
+    return fake_reply(arena, status, S("Content-Type: application/xml\r\n"), body);
 }
 
 static FakeObject *find_object(FakeS3 *s3, String key)
@@ -258,7 +258,7 @@ static String list_objects(FakeS3 *s3, Arena *arena, String query)
         str_builder_append_format(&body, "<NextContinuationToken>%zu</NextContinuationToken>", (size_t)skip + LIST_PAGE);
     }
     str_builder_append(&body, S("</ListBucketResult>"));
-    return reply(arena, 200, S("Content-Type: application/xml\r\n"), str_builder_finish(&body));
+    return fake_reply(arena, 200, S("Content-Type: application/xml\r\n"), str_builder_finish(&body));
 }
 
 static FakeUpload *find_upload(FakeS3 *s3, Arena *arena, String query)
@@ -289,7 +289,7 @@ static String handle_upload(FakeS3 *s3, Arena *arena, const FakeRequest *request
             .headers = str_copy(s3->arena, metadata_lines(arena, request->head)),
         };
         s3->upload_count++;
-        return reply(arena, 200, S(""),
+        return fake_reply(arena, 200, S(""),
                      str_format(arena, "<InitiateMultipartUploadResult><UploadId>%.*s</UploadId>"
                                        "</InitiateMultipartUploadResult>",
                                 (int)upload->id.len, upload->id.data));
@@ -306,11 +306,11 @@ static String handle_upload(FakeS3 *s3, Arena *arena, const FakeRequest *request
             return error_reply(arena, 503, "SlowDown");
         }
         upload->parts[number - 1] = str_copy(s3->arena, request->body);
-        return reply(arena, 200, str_format(arena, "ETag: \"part-%llu\"\r\n", (unsigned long long)number), S(""));
+        return fake_reply(arena, 200, str_format(arena, "ETag: \"part-%llu\"\r\n", (unsigned long long)number), S(""));
     }
     if (str_equal(request->method, S("DELETE"))) {
         atomic_fetch_add(&s3->aborted_uploads, 1);
-        return reply(arena, 204, S(""), S(""));
+        return fake_reply(arena, 204, S(""), S(""));
     }
     // Completing joins the parts the request names, in order.
     StringBuilder body = str_builder_create(arena, 1024);
@@ -321,7 +321,7 @@ static String handle_upload(FakeS3 *s3, Arena *arena, const FakeRequest *request
         }
     }
     store_object(s3, upload->key, str_builder_finish(&body), S("binary/octet-stream"), upload->headers);
-    return reply(arena, 200, S(""),
+    return fake_reply(arena, 200, S(""),
                  S("<CompleteMultipartUploadResult><ETag>&quot;whole-3&quot;</ETag></CompleteMultipartUploadResult>"));
 }
 
@@ -364,7 +364,7 @@ static String handle(FakeS3 *s3, Arena *arena, const FakeRequest *request)
         if (str_equal(request->method, S("PUT"))) {
             bool existed = s3->bucket_exists;
             s3->bucket_exists = true;
-            return existed ? error_reply(arena, 409, "BucketAlreadyOwnedByYou") : reply(arena, 200, S(""), S(""));
+            return existed ? error_reply(arena, 409, "BucketAlreadyOwnedByYou") : fake_reply(arena, 200, S(""), S(""));
         }
         return list_objects(s3, arena, request->query);
     }
@@ -381,18 +381,18 @@ static String handle(FakeS3 *s3, Arena *arena, const FakeRequest *request)
     FakeObject *object = find_object(s3, key);
     if (str_equal(request->method, S("PUT"))) {
         String content_type = S("binary/octet-stream");
-        (void)header_value(request->head, "Content-Type", &content_type);
+        (void)request_header_value(request->head, "Content-Type", &content_type);
         store_object(s3, key, request->body, content_type, metadata_lines(arena, request->head));
-        return reply(arena, 200, str_format(arena, "ETag: \"etag-%.*s\"\r\n", (int)key.len, key.data), S(""));
+        return fake_reply(arena, 200, str_format(arena, "ETag: \"etag-%.*s\"\r\n", (int)key.len, key.data), S(""));
     }
     if (str_equal(request->method, S("DELETE"))) {
         if (object != nullptr) {
             *object = s3->objects[--s3->object_count];
         }
-        return reply(arena, 204, S(""), S(""));
+        return fake_reply(arena, 204, S(""), S(""));
     }
     if (object == nullptr) {
-        return str_equal(request->method, S("HEAD")) ? reply(arena, 404, S(""), S("")) : error_reply(arena, 404, "NoSuchKey");
+        return str_equal(request->method, S("HEAD")) ? fake_reply(arena, 404, S(""), S("")) : error_reply(arena, 404, "NoSuchKey");
     }
     String headers = str_format(arena, "ETag: \"etag-%.*s\"\r\nContent-Type: %.*s\r\nLast-Modified: Wed, 13 Mar 2024 "
                                        "10:00:00 GMT\r\n%.*s",
@@ -402,10 +402,10 @@ static String handle(FakeS3 *s3, Arena *arena, const FakeRequest *request)
         return str_format(arena, "HTTP/1.1 200 Fake\r\nContent-Length: %zu\r\nConnection: close\r\n%.*s\r\n",
                           object->body.len, (int)headers.len, headers.data);
     }
-    return reply(arena, 200, headers, object->body);
+    return fake_reply(arena, 200, headers, object->body);
 }
 
-static void *serve(void *argument)
+static void *serve_fake_s3(void *argument)
 {
     FakeS3 *s3 = argument;
     while (!atomic_load(&s3->stopping)) {
@@ -416,7 +416,7 @@ static void *serve(void *argument)
         (void)net_set_timeouts(client, 5000, nullptr);
         Arena *arena = arena_create(0);
         FakeRequest request = { 0 };
-        if (read_request(arena, client, &request)) {
+        if (read_fake_request(arena, client, &request)) {
             (void)net_send(client, handle(s3, arena, &request), nullptr);
         }
         net_close(client);
@@ -436,7 +436,7 @@ static bool fake_start(Test *test, FakeS3 *s3)
     atomic_init(&s3->aborted_uploads, 0);
     return net_listen(S("127.0.0.1:0"), &s3->listener, nullptr) == ERR_OK &&
            net_local_address(test->arena, s3->listener, &s3->address, nullptr) == ERR_OK &&
-           thread_start(&s3->thread, serve, s3, nullptr) == ERR_OK;
+           thread_start(&s3->thread, serve_fake_s3, s3, nullptr) == ERR_OK;
 }
 
 static void fake_stop(FakeS3 *s3)
@@ -778,13 +778,6 @@ static SigV4Problem verify_example(Arena *arena, const SigV4Received *request, S
     SigV4Signature signature;
     SigV4Problem problem = sigv4_read(arena, request, &signature);
     return problem != SIGV4_OK ? problem : sigv4_verify(arena, request, &signature, secret, now, verified);
-}
-
-static String sha256_hex(Arena *arena, String data)
-{
-    uint8_t digest[SHA256_LEN];
-    sha256(data, digest);
-    return hex_encode(arena, digest, SHA256_LEN);
 }
 
 static void sigv4_verify_checks_the_aws_examples(Test *test)

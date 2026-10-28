@@ -32,38 +32,6 @@ typedef struct {
     void (*run)(void);
 } AbortCase;
 
-// Each test file exports one table, ended by a { nullptr, nullptr } entry.
-extern const TestCase ARENA_TESTS[];
-extern const TestCase STR_TESTS[];
-extern const TestCase STRMAP_TESTS[];
-extern const TestCase IDTABLE_TESTS[];
-extern const TestCase TEXT_TESTS[];
-extern const TestCase PLATFORM_TESTS[];
-extern const TestCase CONCURRENCY_TESTS[];
-extern const TestCase ENCODING_TESTS[];
-extern const TestCase LOG_TESTS[];
-extern const TestCase WATCH_TESTS[];
-extern const TestCase SERVICE_TESTS[];
-extern const TestCase PTY_TESTS[];
-extern const TestCase SYSINFO_TESTS[];
-extern const TestCase HTTP_TESTS[];
-extern const TestCase SMTP_TESTS[];
-extern const TestCase S3_TESTS[];
-extern const TestCase FTP_TESTS[];
-extern const TestCase TERM_STYLE_TESTS[];
-extern const TestCase TERM_ANSI_TESTS[];
-extern const TestCase TERM_ANIMATION_TESTS[];
-extern const TestCase TERM_LIVE_TESTS[];
-extern const TestCase TERM_INPUT_TESTS[];
-extern const TestCase TERM_LIST_TESTS[];
-extern const TestCase TERM_LAYOUT_TESTS[];
-extern const TestCase TERM_SCREEN_TESTS[];
-extern const TestCase TERM_LOG_TESTS[];
-extern const TestCase HTTP_SERVER_TESTS[];
-extern const TestCase STATIC_FILES_TESTS[];
-extern const TestCase ACME_TESTS[];
-extern const AbortCase ABORT_CASES[];
-
 // Abort cases that live with the tests that run them.
 void terminal_round_trip(void);
 void signal_watch_round_trip(void);

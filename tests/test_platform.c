@@ -660,7 +660,7 @@ static void poller_reports_ready_sockets(Test *test)
     poller_destroy(poller);
 }
 
-static void *wake_later(void *argument)
+static void *wake_poller_later(void *argument)
 {
     clock_sleep_ms(50);
     poller_wake(argument);
@@ -678,7 +678,7 @@ static void poller_wakes_from_another_thread(Test *test)
                "a wake before the wait is kept");
     test_check(test, poller_wait(poller, ready, countof(ready), 0) == 0, "and taken once");
     Thread thread;
-    test_check(test, thread_start(&thread, wake_later, poller, &err) == ERR_OK, "start a waker");
+    test_check(test, thread_start(&thread, wake_poller_later, poller, &err) == ERR_OK, "start a waker");
     int64_t start = clock_monotonic_ns();
     size_t count = poller_wait(poller, ready, countof(ready), 5000);
     int64_t elapsed_ms = (clock_monotonic_ns() - start) / 1000000;

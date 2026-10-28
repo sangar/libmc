@@ -30,7 +30,7 @@
 
 extern char **environ;
 
-enum { MAX_ARGS = 1024, MAX_FILES = 512, MAX_JOBS = 16, PATH_MAX_LEN = 1024, FINGERPRINT_LEN = 4096 };
+enum { MAX_ARGS = 1024, MAX_FILES = 512, MAX_JOBS = 16, PATH_MAX_LEN = 1024, FINGERPRINT_LEN = 16384 };
 
 typedef struct {
     const char *items[MAX_ARGS];
@@ -169,11 +169,11 @@ static const Dependency DEPENDENCIES[] = {
       sizeof CURL_FLAGS / sizeof *CURL_FLAGS, true },
 };
 
-// HEADER_DIRECTORIES are the dependency headers whose changes rebuild everything.
-static const char *const HEADER_DIRECTORIES[] = {
-    "deps/cyaml", "deps/utf8proc", "deps/yyjson", "deps/curl/include/curl", "deps/mbedtls/include/mbedtls",
-    "deps/mbedtls/tf-psa-crypto/include/psa", "deps/nghttp2/lib/includes/nghttp2", "deps/zlib", "deps/cacert",
-    "deps/md4c", "deps/expat/lib", "deps/llhttp/include", "src/encoding", "src/net",
+// DEPENDENCY_INPUTS shape what the dependencies compile to: deps.lock pins their sources and headers, and the
+// rest is their configuration that lives in libmc. A change to any of them rebuilds everything.
+static const char *const DEPENDENCY_INPUTS[] = {
+    "deps.lock", "src/net/mbedtls_user_config.h", "src/encoding/expat_config.h", "src/net/curl/linux/curl_config.h",
+    "src/net/curl/macos/curl_config.h", "src/net/curl/macos/sdk/SystemConfiguration/SCDynamicStoreCopySpecific.h",
 };
 
 static void command_push(Command *command, const char *item)
@@ -264,6 +264,8 @@ static void list_files(FileList *list, const char *directory, const char *extens
     closedir(dir);
 }
 
+// newest_header_mtime is the newest of libmc's own headers. The dependencies' headers change only with
+// deps.lock, which the fingerprint covers.
 static time_t newest_header_mtime(void)
 {
     FileList headers = { 0 };
@@ -274,10 +276,6 @@ static time_t newest_header_mtime(void)
         snprintf(directory, sizeof directory, "src/%s", AREAS[i]);
         list_files(&headers, directory, ".h");
     }
-    for (size_t i = 0; i < sizeof HEADER_DIRECTORIES / sizeof *HEADER_DIRECTORIES; i++) {
-        list_files(&headers, HEADER_DIRECTORIES[i], ".h");
-    }
-    list_files(&headers, "tests", ".h");
     time_t newest = 0;
     for (size_t i = 0; i < headers.count; i++) {
         time_t t = mtime_of(headers.items[i]);
@@ -769,8 +767,18 @@ static void fetch_dependencies(void)
     fclose(lock);
 }
 
-// fingerprint describes what shapes objects besides their sources and headers:
-// the compiler's version and the compile command.
+static void append_line(char *out, size_t size, size_t *at, const char *line)
+{
+    int n = snprintf(out + *at, size - *at, "%s\n", line);
+    if (n < 0 || (size_t)n >= size - *at) {
+        fprintf(stderr, "build: fingerprint too long\n");
+        exit(2);
+    }
+    *at += (size_t)n;
+}
+
+// fingerprint describes what shapes objects besides libmc's sources and headers: the compiler's version,
+// every compile command and the DEPENDENCY_INPUTS.
 static void fingerprint(const Build *build, char *out, size_t size)
 {
     // The version does not depend on the target, and zig cc rejects the glibc version in one with --version.
@@ -789,11 +797,25 @@ static void fingerprint(const Build *build, char *out, size_t size)
         version[fread(version, 1, sizeof version - 1, pipe)] = '\0';
         pclose(pipe);
     }
-    Command compile_command = { 0 };
-    push_compile_command(&compile_command, build);
-    char flags[FINGERPRINT_LEN / 2];
-    command_text(&compile_command, flags, sizeof flags);
-    snprintf(out, size, "%s%s\n", version, flags);
+    size_t at = 0;
+    append_line(out, size, &at, version);
+    Build each = *build;
+    size_t dependency_count = sizeof DEPENDENCIES / sizeof *DEPENDENCIES;
+    for (size_t i = 0; i <= dependency_count; i++) {
+        each.dependency = i < dependency_count ? &DEPENDENCIES[i] : NULL;
+        Command compile_command = { 0 };
+        push_compile_command(&compile_command, &each);
+        char text[FINGERPRINT_LEN / 4];
+        command_text(&compile_command, text, sizeof text);
+        append_line(out, size, &at, text);
+    }
+    for (size_t i = 0; i < sizeof DEPENDENCY_INPUTS / sizeof *DEPENDENCY_INPUTS; i++) {
+        char hex[SHA256_HEX_LEN + 1];
+        hash_file(DEPENDENCY_INPUTS[i], hex);
+        char line[PATH_MAX_LEN + SHA256_HEX_LEN + 2];
+        snprintf(line, sizeof line, "%s %s", DEPENDENCY_INPUTS[i], hex);
+        append_line(out, size, &at, line);
+    }
 }
 
 // discard_stale_objects removes the objects when the fingerprint changed since they were built.
@@ -879,10 +901,14 @@ static void jobs_run(Jobs *jobs)
     }
 }
 
-// compile queues a compile of source into object unless object is current.
+// compile queues a compile of source into object unless object is current. A dependency's object is
+// current once it exists: its inputs change only with the fingerprint, which discards it.
 static void compile(const Build *build, const char *source, const char *object, Jobs *jobs)
 {
-    if (mtime_of(object) > mtime_of(source) && mtime_of(object) > build->headers_mtime) {
+    bool current = build->dependency != NULL
+                       ? mtime_of(object) > 0
+                       : mtime_of(object) > mtime_of(source) && mtime_of(object) > build->headers_mtime;
+    if (current) {
         return;
     }
     if (jobs->count == MAX_FILES) {
@@ -974,47 +1000,33 @@ static void build_library(const Build *build, FileList *objects, char *library_o
     write_text(members_path, members);
 }
 
+// The tests are one translation unit, tests/main.c, which includes every test file. Compiling and
+// linking it on every run takes about a second, so nothing tracks what it depends on.
 static int build_and_run_tests(const Build *build)
 {
     FileList objects = { 0 };
     char library[PATH_MAX_LEN];
     build_library(build, &objects, library);
-    Build tests = *build;
-    snprintf(tests.obj_dir, sizeof tests.obj_dir, "%s/tests", build->obj_dir);
-    mkdir_p(tests.obj_dir);
-    FileList test_objects = { 0 };
-    Jobs *jobs = jobs_create();
-    compile_directory(&tests, "tests", &test_objects, jobs);
-    jobs_run(jobs);
-    free(jobs);
-
     char binary[PATH_MAX_LEN];
     snprintf(binary, sizeof binary, "%s/tests", build->out_dir);
-    if (mtime_of(binary) <= newest_of(&test_objects) || mtime_of(binary) <= mtime_of(library)) {
-        Command command = { 0 };
-        push_compiler(&command, build);
-        if (sanitized(build)) {
-            command_push(&command, build->flavor == FLAVOR_TSAN ? "-fsanitize=thread" : "-fsanitize=address,undefined");
-        }
-        for (size_t i = 0; i < test_objects.count; i++) {
-            command_push(&command, test_objects.items[i]);
-        }
-        command_push(&command, library);
-        command_push(&command, "-lpthread");
-        command_push(&command, "-lm");
+    Command command = { 0 };
+    push_compile_command(&command, build);
+    command_push(&command, "tests/main.c");
+    command_push(&command, library);
+    command_push(&command, "-lpthread");
+    command_push(&command, "-lm");
 #ifdef __APPLE__
-        // File watching uses CoreServices; curl asks SystemConfiguration for the proxies once, so that
-        // NAT64 address synthesis works.
-        static const char *const FRAMEWORKS[] = { "CoreServices", "SystemConfiguration", "CoreFoundation" };
-        for (size_t i = 0; i < sizeof FRAMEWORKS / sizeof *FRAMEWORKS; i++) {
-            command_push(&command, "-framework");
-            command_push(&command, FRAMEWORKS[i]);
-        }
-#endif
-        command_push(&command, "-o");
-        command_push(&command, binary);
-        run_or_die(&command);
+    // File watching uses CoreServices; curl asks SystemConfiguration for the proxies once, so that
+    // NAT64 address synthesis works.
+    static const char *const FRAMEWORKS[] = { "CoreServices", "SystemConfiguration", "CoreFoundation" };
+    for (size_t i = 0; i < sizeof FRAMEWORKS / sizeof *FRAMEWORKS; i++) {
+        command_push(&command, "-framework");
+        command_push(&command, FRAMEWORKS[i]);
     }
+#endif
+    command_push(&command, "-o");
+    command_push(&command, binary);
+    run_or_die(&command);
     Command run = { 0 };
     command_push(&run, binary);
     return command_run(&run);

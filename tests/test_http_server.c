@@ -125,7 +125,7 @@ static String exchange_with(Test *test, const HttpCompression *compression, Stri
     return reply;
 }
 
-static String exchange(Test *test, String request)
+static String exchange_request(Test *test, String request)
 {
     return exchange_with(test, nullptr, request);
 }
@@ -160,7 +160,7 @@ static void http_server_gzips_what_is_worth_it(Test *test)
         test_check(test, !str_contains(exchange_with(test, &COMPRESSION, S(UNCOMPRESSED[i])), S("Content-Encoding")),
                    UNCOMPRESSED[i]);
     }
-    test_check(test, !str_contains(exchange(test, S("GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip\r\n\r\n")),
+    test_check(test, !str_contains(exchange_request(test, S("GET /page HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip\r\n\r\n")),
                                    S("Content-Encoding")),
                "a server without compression sends as it is");
     size_t first = accepted.len;
@@ -173,7 +173,7 @@ static void http_server_gzips_what_is_worth_it(Test *test)
 
 static void http_server_answers_pipelined_requests_in_order(Test *test)
 {
-    String reply = exchange(test, S("GET /a HTTP/1.1\r\nHost: h\r\n\r\nPOST /b HTTP/1.1\r\nHost: h\r\n"
+    String reply = exchange_request(test, S("GET /a HTTP/1.1\r\nHost: h\r\n\r\nPOST /b HTTP/1.1\r\nHost: h\r\n"
                                     "Content-Length: 8\r\n\r\nblåbær"));
     size_t first = 0;
     size_t second = 0;
@@ -186,9 +186,9 @@ static void http_server_answers_pipelined_requests_in_order(Test *test)
 
 static void http_server_reports_the_http_version(Test *test)
 {
-    test_check(test, str_ends_with(exchange(test, S("GET /version HTTP/1.1\r\nHost: h\r\n\r\n")), S("\r\n\r\n1.1")),
+    test_check(test, str_ends_with(exchange_request(test, S("GET /version HTTP/1.1\r\nHost: h\r\n\r\n")), S("\r\n\r\n1.1")),
                "HTTP/1.1");
-    test_check(test, str_ends_with(exchange(test, S("GET /version HTTP/1.0\r\n\r\n")), S("\r\n\r\n1.0")), "HTTP/1.0");
+    test_check(test, str_ends_with(exchange_request(test, S("GET /version HTTP/1.0\r\n\r\n")), S("\r\n\r\n1.0")), "HTTP/1.0");
 }
 
 static void http_server_refuses_ambiguous_requests(Test *test)
@@ -209,13 +209,13 @@ static void http_server_refuses_ambiguous_requests(Test *test)
         { "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 2000000\r\n\r\n", "413" },
     };
     for (size_t i = 0; i < countof(CASES); i++) {
-        String reply = exchange(test, S(CASES[i].request));
+        String reply = exchange_request(test, S(CASES[i].request));
         String expected = str_format(test->arena, "HTTP/1.1 %s ", CASES[i].status);
         test_check(test, str_starts_with(reply, expected) && str_contains(reply, S("Connection: close")),
                    CASES[i].request);
     }
     String header = str_repeat(test->arena, S("a"), 9000);
-    String reply = exchange(test, str_format(test->arena, "GET / HTTP/1.1\r\nHost: h\r\nX: %.*s\r\n\r\n",
+    String reply = exchange_request(test, str_format(test->arena, "GET / HTTP/1.1\r\nHost: h\r\nX: %.*s\r\n\r\n",
                                              (int)header.len, header.data));
     test_check(test, str_starts_with(reply, S("HTTP/1.1 431 ")), "a header over the limit");
 }
@@ -262,23 +262,23 @@ static void http_fields_read_and_write(Test *test)
 
 static void http_server_answers_500_for_failures(Test *test)
 {
-    test_check(test, str_starts_with(exchange(test, S("GET /fail HTTP/1.1\r\nHost: h\r\n\r\n")), S("HTTP/1.1 500 ")),
+    test_check(test, str_starts_with(exchange_request(test, S("GET /fail HTTP/1.1\r\nHost: h\r\n\r\n")), S("HTTP/1.1 500 ")),
                "a failing handler");
-    String injected = exchange(test, S("GET /bad-header HTTP/1.1\r\nHost: h\r\n\r\n"));
+    String injected = exchange_request(test, S("GET /bad-header HTTP/1.1\r\nHost: h\r\n\r\n"));
     test_check(test, str_starts_with(injected, S("HTTP/1.1 500 ")) && !str_contains(injected, S("Set-Cookie")),
                "a line break in a response field");
 }
 
 static void http_server_continues_and_answers_head(Test *test)
 {
-    String continued = exchange(test, S("POST /c HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\n"
+    String continued = exchange_request(test, S("POST /c HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\n"
                                         "Content-Length: 2\r\n\r\nhi"));
     test_check(test, str_starts_with(continued, S("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n")) &&
                          str_ends_with(continued, S("POST /c hi")),
                "100-continue comes before the response");
-    String head = exchange(test, S("HEAD /æ HTTP/1.1\r\nHost: h\r\n\r\n"));
+    String head = exchange_request(test, S("HEAD /æ HTTP/1.1\r\nHost: h\r\n\r\n"));
     test_check(test, str_starts_with(head, S("HTTP/1.1 400 ")), "a target that is not ASCII");
-    head = exchange(test, S("HEAD /h HTTP/1.1\r\nHost: h\r\n\r\n"));
+    head = exchange_request(test, S("HEAD /h HTTP/1.1\r\nHost: h\r\n\r\n"));
     test_check(test, str_contains(head, S("Content-Length: 8\r\n")) && str_ends_with(head, S("\r\n\r\n")),
                "HEAD has the length but no body");
 }
@@ -291,7 +291,7 @@ static void http_server_exchanges_http2_with_prior_knowledge(Test *test)
     static const char REQUEST[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
                                   "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
                                   "\x00\x00\x06\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x01h";
-    String reply = exchange(test, (String){ REQUEST, sizeof REQUEST - 1 });
+    String reply = exchange_request(test, (String){ REQUEST, sizeof REQUEST - 1 });
     static const char STATUS_200[] = "\x01\x04\x00\x00\x00\x01\x88";
     test_check(test, str_contains(reply, (String){ STATUS_200, sizeof STATUS_200 - 1 }) && str_contains(reply, S("GET / ")),
                "the request is answered 200 on its stream");
@@ -300,7 +300,7 @@ static void http_server_exchanges_http2_with_prior_knowledge(Test *test)
                                 "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
                                 "\x00\x00\x06\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x01h"
                                 "\x00\x00\x04\x03\x00\x00\x00\x00\x01\x00\x00\x00\x08";
-    reply = exchange(test, (String){ RESET, sizeof RESET - 1 });
+    reply = exchange_request(test, (String){ RESET, sizeof RESET - 1 });
     test_check(test, !str_contains(reply, S("GET / ")), "a request reset before its handler ran is not answered");
 }
 
