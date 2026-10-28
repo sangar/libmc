@@ -9,7 +9,17 @@
 #include "mc/platform/platform.h"
 #include "mc/text/fmt.h"
 
-enum { MAX_CONCURRENT_STREAMS = 100, STREAM_WINDOW_BYTES = 65535, OUTPUT_CAPACITY = 16384, MAX_RESPONSE_HEADERS = 64 };
+enum {
+    MAX_CONCURRENT_STREAMS = 100,
+    STREAM_WINDOW_BYTES = 65535,
+    OUTPUT_CAPACITY = 16384,
+    MAX_RESPONSE_HEADERS = 64,
+    // RST_STREAM rate limit against Rapid Reset (CVE-2023-44487): a
+    // token-bucket, one token per reset, GOAWAY when it empties.
+    RESET_BURST = 1000,
+    RESET_RATE = 33,
+    MAX_SETTINGS_ENTRIES = 32, // a SETTINGS flood past this closes the session
+};
 
 struct Http2Stream {
     Http2 *http;
@@ -379,10 +389,20 @@ Http2 *http2_create(HttpServerLimits limits, bool streaming)
     // A streamed body's window opens as the handler reads it, so a slow
     // reader slows the client instead of filling memory.
     nghttp2_option_set_no_auto_window_update(option, streaming ? 1 : 0);
+    // Bound two cheap floods regardless of the nghttp2 default: a stream of
+    // RST_STREAM (Rapid Reset) and an oversized SETTINGS frame.
+    nghttp2_option_set_stream_reset_rate_limit(option, RESET_BURST, RESET_RATE);
+    nghttp2_option_set_max_settings(option, MAX_SETTINGS_ENTRIES);
     int status = nghttp2_session_server_new2(&http->session, callbacks, http, option);
     nghttp2_option_del(option);
     nghttp2_session_callbacks_del(callbacks);
-    nghttp2_settings_entry settings[] = { { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, MAX_CONCURRENT_STREAMS } };
+    // MAX_HEADER_LIST_SIZE lets nghttp2 reject an oversized header set while
+    // decoding, bounding a CONTINUATION flood before the per-field callback and
+    // its own max_header_bytes cap (http2.c header()) ever runs.
+    nghttp2_settings_entry settings[] = {
+        { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, MAX_CONCURRENT_STREAMS },
+        { NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, (uint32_t)limits.max_header_bytes },
+    };
     if (status != 0 || nghttp2_submit_settings(http->session, NGHTTP2_FLAG_NONE, settings, countof(settings)) != 0) {
         abort();
     }
