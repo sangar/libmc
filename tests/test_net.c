@@ -74,7 +74,7 @@ static String read_request(Arena *arena, Connection *connection)
     return (String){ buffer, received };
 }
 
-static String answer(Arena *arena, int status, const char *headers, String body)
+static String format_response(Arena *arena, int status, const char *headers, String body)
 {
     String head = str_format(arena, "HTTP/1.1 %d Test\r\nContent-Length: %zu\r\nConnection: close\r\n%s\r\n", status,
                              body.len, headers);
@@ -105,32 +105,32 @@ static String route(Arena *arena, String request)
     str_cut(line, ' ', &method, &rest);
     str_cut(rest, ' ', &path, &rest);
     if (str_equal(path, S("/echo"))) {
-        return answer(arena, 200, "Content-Type: text/plain\r\nX-Test: yes\r\n", request);
+        return format_response(arena, 200, "Content-Type: text/plain\r\nX-Test: yes\r\n", request);
     }
     if (str_equal(path, S("/found"))) {
-        return answer(arena, 302, "Location: /echo\r\n", S(""));
+        return format_response(arena, 302, "Location: /echo\r\n", S(""));
     }
     if (str_equal(path, S("/see-other"))) {
-        return answer(arena, 303, "Location: /echo\r\n", S(""));
+        return format_response(arena, 303, "Location: /echo\r\n", S(""));
     }
     if (str_equal(path, S("/temporary"))) {
-        return answer(arena, 307, "Location: /echo\r\n", S(""));
+        return format_response(arena, 307, "Location: /echo\r\n", S(""));
     }
     if (str_equal(path, S("/loop"))) {
-        return answer(arena, 302, "Location: /loop\r\n", S(""));
+        return format_response(arena, 302, "Location: /loop\r\n", S(""));
     }
     if (str_equal(path, S("/elsewhere"))) {
-        return answer(arena, 302, "Location: http://elsewhere.invalid/echo\r\n", S(""));
+        return format_response(arena, 302, "Location: http://elsewhere.invalid/echo\r\n", S(""));
     }
     if (str_equal(path, S("/unavailable"))) {
-        return answer(arena, 503, "Retry-After: 120\r\n", S("try later"));
+        return format_response(arena, 503, "Retry-After: 120\r\n", S("try later"));
     }
     if (str_equal(path, S("/large"))) {
-        return answer(arena, 200, "", str_repeat(arena, S("x"), 4096));
+        return format_response(arena, 200, "", str_repeat(arena, S("x"), 4096));
     }
     if (str_equal(path, S("/slow"))) {
         clock_sleep_ms(SLOW_ROUTE_MS);
-        return answer(arena, 200, "", S("late"));
+        return format_response(arena, 200, "", S("late"));
     }
     if (str_equal(path, S("/large-chunked"))) {
         String chunk = str_repeat(arena, S("x"), 1024);
@@ -139,16 +139,16 @@ static String route(Arena *arena, String request)
                           (int)chunk.len, chunk.data, (int)chunk.len, chunk.data);
     }
     if (str_equal(path, S("/gzip"))) {
-        return answer(arena, 200, "Content-Encoding: gzip\r\n", (String){ (const char *)GZIP_HELLO, sizeof GZIP_HELLO });
+        return format_response(arena, 200, "Content-Encoding: gzip\r\n", (String){ (const char *)GZIP_HELLO, sizeof GZIP_HELLO });
     }
     if (str_equal(path, S("/gzip-large"))) {
-        return answer(arena, 200, "Content-Encoding: gzip\r\n", (String){ (const char *)GZIP_LARGE, sizeof GZIP_LARGE });
+        return format_response(arena, 200, "Content-Encoding: gzip\r\n", (String){ (const char *)GZIP_LARGE, sizeof GZIP_LARGE });
     }
     if (str_equal(path, S("/chunked"))) {
         return S("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
                  "6\r\nhello \r\n5\r\nworld\r\n0\r\n\r\n");
     }
-    return answer(arena, 404, "", S("no such route"));
+    return format_response(arena, 404, "", S("no such route"));
 }
 
 // SmtpServer takes one mail session at a time: over TLS from the start when

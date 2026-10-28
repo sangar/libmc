@@ -276,7 +276,6 @@ static time_t newest_header_mtime(void)
         snprintf(directory, sizeof directory, "src/%s", AREAS[i]);
         list_files(&headers, directory, ".h");
     }
-    list_files(&headers, "tests", ".h");
     time_t newest = 0;
     for (size_t i = 0; i < headers.count; i++) {
         time_t t = mtime_of(headers.items[i]);
@@ -1001,47 +1000,33 @@ static void build_library(const Build *build, FileList *objects, char *library_o
     write_text(members_path, members);
 }
 
+// The tests are one translation unit, tests/main.c, which includes every test file. Compiling and
+// linking it on every run takes about a second, so nothing tracks what it depends on.
 static int build_and_run_tests(const Build *build)
 {
     FileList objects = { 0 };
     char library[PATH_MAX_LEN];
     build_library(build, &objects, library);
-    Build tests = *build;
-    snprintf(tests.obj_dir, sizeof tests.obj_dir, "%s/tests", build->obj_dir);
-    mkdir_p(tests.obj_dir);
-    FileList test_objects = { 0 };
-    Jobs *jobs = jobs_create();
-    compile_directory(&tests, "tests", &test_objects, jobs);
-    jobs_run(jobs);
-    free(jobs);
-
     char binary[PATH_MAX_LEN];
     snprintf(binary, sizeof binary, "%s/tests", build->out_dir);
-    if (mtime_of(binary) <= newest_of(&test_objects) || mtime_of(binary) <= mtime_of(library)) {
-        Command command = { 0 };
-        push_compiler(&command, build);
-        if (sanitized(build)) {
-            command_push(&command, build->flavor == FLAVOR_TSAN ? "-fsanitize=thread" : "-fsanitize=address,undefined");
-        }
-        for (size_t i = 0; i < test_objects.count; i++) {
-            command_push(&command, test_objects.items[i]);
-        }
-        command_push(&command, library);
-        command_push(&command, "-lpthread");
-        command_push(&command, "-lm");
+    Command command = { 0 };
+    push_compile_command(&command, build);
+    command_push(&command, "tests/main.c");
+    command_push(&command, library);
+    command_push(&command, "-lpthread");
+    command_push(&command, "-lm");
 #ifdef __APPLE__
-        // File watching uses CoreServices; curl asks SystemConfiguration for the proxies once, so that
-        // NAT64 address synthesis works.
-        static const char *const FRAMEWORKS[] = { "CoreServices", "SystemConfiguration", "CoreFoundation" };
-        for (size_t i = 0; i < sizeof FRAMEWORKS / sizeof *FRAMEWORKS; i++) {
-            command_push(&command, "-framework");
-            command_push(&command, FRAMEWORKS[i]);
-        }
-#endif
-        command_push(&command, "-o");
-        command_push(&command, binary);
-        run_or_die(&command);
+    // File watching uses CoreServices; curl asks SystemConfiguration for the proxies once, so that
+    // NAT64 address synthesis works.
+    static const char *const FRAMEWORKS[] = { "CoreServices", "SystemConfiguration", "CoreFoundation" };
+    for (size_t i = 0; i < sizeof FRAMEWORKS / sizeof *FRAMEWORKS; i++) {
+        command_push(&command, "-framework");
+        command_push(&command, FRAMEWORKS[i]);
     }
+#endif
+    command_push(&command, "-o");
+    command_push(&command, binary);
+    run_or_die(&command);
     Command run = { 0 };
     command_push(&run, binary);
     return command_run(&run);

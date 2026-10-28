@@ -50,7 +50,7 @@ Then:
 
 The dependencies are not committed. Every build but `clean` checks `deps/<name>` against the hash in `deps.lock` and, when it is missing or differs, fetches it with `curl` from this repository's release `deps-<name>-<version>`, so the first build needs the network. To update one, put the new source in `deps/<name>`, trimmed to what the build compiles plus its license, update its line with the version, the new release URL and `./nob hash deps/<name>`, and publish it with `tools/publish-dep.sh`. `tools/cacert.sh` writes a newer extract of Mozilla's roots into `deps/cacert`.
 
-Host builds use `$CC`, or `cc` when it is unset: `CC=gcc-14 ./nob test`. Each build records the compiler version, every compile command, `deps.lock` and the dependencies' configuration under `src/` in `out/<build>/fingerprint`, and recompiles everything when they change. Otherwise each dependency is compiled once, and a libmc source is recompiled when it or one of libmc's headers changes.
+Host builds use `$CC`, or `cc` when it is unset: `CC=gcc-14 ./nob test`. Each build records the compiler version, every compile command, `deps.lock` and the dependencies' configuration under `src/` in `out/<build>/fingerprint`, and recompiles everything when they change. Otherwise each dependency is compiled once, and a libmc source is recompiled when it or one of libmc's headers changes. The tests are one translation unit: `tests/main.c` includes every test file and is compiled on every `./nob test`.
 
 CI runs `./nob test` and `./nob release` with clang 18 and gcc 14 on Linux x86_64 and aarch64 and with clang on macOS aarch64, and `./nob cross` with the pinned zig; see `.github/workflows/ci.yml`.
 
