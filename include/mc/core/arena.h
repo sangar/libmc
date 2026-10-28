@@ -28,8 +28,9 @@ size_t arena_size_add(size_t a, size_t b);
 size_t arena_size_mul(size_t a, size_t b);
 
 // arena_grow makes room for one more item in a dynamic array of count items:
-// it returns items unchanged while count < *capacity, else a copy with twice
-// the capacity, and updates *capacity.
+// it returns items unchanged while count < *capacity, else items with twice
+// the capacity, and updates *capacity. The array grows in place when it is
+// the arena's newest allocation and its block has room, else it is copied.
 void *arena_grow(Arena *arena, void *items, size_t *capacity, size_t count, size_t item_size);
 
 // arena_reset discards every allocation and frees all blocks but the first;
