@@ -29,9 +29,10 @@ void static_files_destroy(StaticFiles *files);
 // static_files_serve answers request from the files, in arena, when its
 // path is under the prefix and names a regular file, or a directory with an
 // index.html, no larger than max_file_bytes, and reports whether it did;
-// otherwise the caller answers. The path is percent-decoded and cleaned, so
-// no request path reaches outside root; symlinks under root are followed, as
-// its owner put them there. A file goes with its Content-Type by its
+// otherwise the caller answers. The path is percent-decoded and cleaned, and
+// the file's real path must resolve under root, so neither a request path nor
+// a symlink reaches outside it; a symlink to another file under root is
+// followed. A file goes with its Content-Type by its
 // extension and an ETag, which If-None-Match turns into 304. A file small
 // enough to cache goes gzipped when the client accepts it and that is
 // smaller; larger ones are left to the server's compression. Methods but

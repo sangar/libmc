@@ -5,6 +5,10 @@
 #include "mc/platform/platform.h"
 #include "mc/text/path.h"
 
+// Declared here rather than via <unistd.h>, which also declares write and
+// would clash with this file's own write helper.
+int symlink(const char *target, const char *linkpath);
+
 // The tests serve files from a temporary directory, public/, with a secret
 // file beside it that no request may reach.
 
@@ -122,14 +126,24 @@ static void static_files_keep_requests_under_the_root(Test *test)
 {
     static const char *const ESCAPES[] = {
         "/../secret.txt", "/%2e%2e/secret.txt", "/sub/../../secret.txt", "/%2E%2E%2Fsecret.txt", "/style.css%00.html", "/%",
+        "/escape.txt", // a symlink under root pointing at the secret outside it
     };
     Site site;
     if (site_start(test, &site)) {
+        String outside = path_join(test->arena, site.directory, S("secret.txt"));
+        String escape = path_join(test->arena, site.root, S("escape.txt"));
+        String inside = path_join(test->arena, site.root, S("alias.html"));
+        test_check(test, symlink(str_cstr(test->arena, outside), str_cstr(test->arena, escape)) == 0, "escape symlink");
+        test_check(test, symlink("index.html", str_cstr(test->arena, inside)) == 0, "in-root symlink");
         for (size_t i = 0; i < countof(ESCAPES); i++) {
             HttpServerResponse response;
             bool served = get(test, &site, "GET", ESCAPES[i], nullptr, nullptr, &response);
             test_check(test, !served || !str_contains(response.body, S("secret")), ESCAPES[i]);
         }
+        HttpServerResponse response;
+        test_check(test, get(test, &site, "GET", "/alias.html", nullptr, nullptr, &response) &&
+                             str_equal(response.body, site.page),
+                   "a symlink within root is followed");
     }
     site_stop(&site);
 }
