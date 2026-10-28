@@ -205,6 +205,12 @@ typedef struct ProcessResult {
 // and capturing its output into the arena. A non-zero exit is not an error;
 // a program that cannot be started is ERR_NOT_FOUND or ERR_PLATFORM.
 [[nodiscard]] Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResult *result, Err *err);
+// process_run_timeout is process_run that gives up after timeout_ms: it then
+// kills the child and every process the child started, which run in a process
+// group of their own, and fails with ERR_TIMEOUT. That group does not get the
+// terminal's interrupt, so a negative timeout_ms runs it as process_run does.
+[[nodiscard]] Error process_run_timeout(Arena *arena, StringList argv, String stdin_text, int64_t timeout_ms,
+                                        ProcessResult *result, Err *err);
 // process_run_interactive runs argv on this process's terminal; *exit_code is 128 plus the signal when one ended it.
 [[nodiscard]] Error process_run_interactive(Arena *scratch, StringList argv, int *exit_code, Err *err);
 bool process_look_path(Arena *arena, String name, String *path);

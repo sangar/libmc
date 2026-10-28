@@ -1237,10 +1237,11 @@ static bool would_block(void)
     return errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK;
 }
 
-// pump writes stdin_text to the child and reads its output until both output pipes close.
+// pump writes stdin_text to the child and reads its output until both output pipes close,
+// or fails with ERR_TIMEOUT once the clock_monotonic_ns deadline passes; a negative deadline never does.
 // The descriptors are nonblocking, so a full pipe in one direction never stops the others.
 [[nodiscard]] static Error pump(Arena *arena, int stdin_fd, String stdin_text, int stdout_fd, int stderr_fd,
-                                Capture *out, Capture *errors, Err *err)
+                                int64_t deadline_ns, Capture *out, Capture *errors, Err *err)
 {
     size_t written = 0;
     if (stdin_text.len == 0) {
@@ -1258,7 +1259,16 @@ static bool would_block(void)
         if (stderr_fd >= 0) {
             fds[count++] = (struct pollfd){ .fd = stderr_fd, .events = POLLIN };
         }
-        if (poll(fds, count, -1) < 0) {
+        int wait_ms = -1;
+        if (deadline_ns >= 0) {
+            int64_t left_ns = deadline_ns - clock_monotonic_ns();
+            if (left_ns <= 0) {
+                close_pipes(&stdin_fd, &stdout_fd, &stderr_fd);
+                return err_set(err, ERR_TIMEOUT, "process did not finish in time");
+            }
+            wait_ms = (int)(left_ns / 1000000 + 1);
+        }
+        if (poll(fds, count, wait_ms) < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -1381,7 +1391,8 @@ static bool disable_sigpipe(int fd)
 // the SIGPIPE a failed write left pending. The rest of the process keeps its
 // own SIGPIPE handling.
 [[nodiscard]] static Error pump_without_sigpipe(Arena *arena, int stdin_fd, String stdin_text, int stdout_fd,
-                                                int stderr_fd, Capture *out, Capture *errors, Err *err)
+                                                int stderr_fd, int64_t deadline_ns, Capture *out, Capture *errors,
+                                                Err *err)
 {
     sigset_t sigpipe_only;
     sigemptyset(&sigpipe_only);
@@ -1391,7 +1402,7 @@ static bool disable_sigpipe(int fd)
     sigset_t pending;
     sigpending(&pending);
     bool was_pending = sigismember(&pending, SIGPIPE);
-    Error e = pump(arena, stdin_fd, stdin_text, stdout_fd, stderr_fd, out, errors, err);
+    Error e = pump(arena, stdin_fd, stdin_text, stdout_fd, stderr_fd, deadline_ns, out, errors, err);
     sigpending(&pending);
     if (!was_pending && sigismember(&pending, SIGPIPE)) {
         int number;
@@ -1427,6 +1438,12 @@ static bool disable_sigpipe(int fd)
 
 Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResult *result, Err *err)
 {
+    return process_run_timeout(arena, argv, stdin_text, -1, result, err);
+}
+
+Error process_run_timeout(Arena *arena, StringList argv, String stdin_text, int64_t timeout_ms,
+                          ProcessResult *result, Err *err)
+{
     *result = (ProcessResult){ .stdout_text = S(""), .stderr_text = S("") };
     if (argv.count == 0) {
         return err_set(err, ERR_INVALID_ARGUMENT, "run: no program");
@@ -1456,7 +1473,7 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
         if (rc == 0) {
             rc = redirect_child(&actions, in_pipe[0], out_pipe[1], err_pipe[1]);
             if (rc == 0) {
-                rc = default_signals(&attributes, 0);
+                rc = default_signals(&attributes, timeout_ms >= 0 ? POSIX_SPAWN_SETPGROUP : 0);
             }
             if (rc == 0) {
                 rc = posix_spawnp(&pid, items[0], &actions, &attributes, items, environ);
@@ -1477,7 +1494,12 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
 
     Capture out = { 0 };
     Capture errors = { 0 };
-    Error pumped = pump_without_sigpipe(arena, in_pipe[1], stdin_text, out_pipe[0], err_pipe[0], &out, &errors, err);
+    int64_t deadline_ns = timeout_ms >= 0 ? clock_monotonic_ns() + timeout_ms * 1000000 : -1;
+    Error pumped = pump_without_sigpipe(arena, in_pipe[1], stdin_text, out_pipe[0], err_pipe[0], deadline_ns, &out,
+                                        &errors, err);
+    if (pumped == ERR_TIMEOUT) {
+        kill(-pid, SIGKILL);
+    }
     int status = 0;
     Error waited = wait_for(pid, &status, err);
     if (pumped != ERR_OK) {
