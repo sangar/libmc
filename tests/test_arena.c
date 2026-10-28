@@ -92,6 +92,12 @@ static void arena_grow_doubles_and_keeps_items(Test *test)
     }
     test_check(test, capacity == 128, "capacity doubles from 8");
     test_check(test, items[0] == 0 && items[99] == 99, "items survive growth");
+    test_check(test, arena_bytes_used(arena) == 128 * sizeof *items, "the newest array grows in place");
+    int *grown = arena_grow(arena, items, &capacity, count + 28, sizeof *items);
+    test_check(test, grown == items && grown[255] == 0, "in place, the new room is zero");
+    arena_push(arena, 1);
+    int *moved = arena_grow(arena, grown, &capacity, capacity, sizeof *items);
+    test_check(test, moved != grown && moved[99] == 99, "an array with allocations after it is copied");
     arena_destroy(arena);
 }
 
