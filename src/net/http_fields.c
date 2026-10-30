@@ -1,3 +1,5 @@
+#include <assert.h>
+
 #include "mc/net/http.h"
 #include "mc/net/http_server.h"
 #include "mc/text/fmt.h"
@@ -106,4 +108,65 @@ HttpRangeResult http_parse_range(String field, int64_t size, int64_t *first, int
     *first = start;
     *last = to.len == 0 || end >= size ? size - 1 : end;
     return HTTP_RANGE_SATISFIABLE;
+}
+
+// language_weight reads the parameter of one Accept-Language element, "q="
+// and a qvalue, in thousandths, and fails on anything else.
+static bool language_weight(String parameter, unsigned *weight)
+{
+    if (parameter.len < 3 || (parameter.data[0] != 'q' && parameter.data[0] != 'Q') || parameter.data[1] != '=') {
+        return false;
+    }
+    String value = str_slice(parameter, 2, parameter.len);
+    char whole = value.data[0];
+    if ((whole != '0' && whole != '1') || value.len > 5 || (value.len > 1 && value.data[1] != '.')) {
+        return false;
+    }
+    unsigned thousandths = whole == '1' ? 1000 : 0;
+    unsigned scale = 100;
+    for (size_t i = 2; i < value.len; i++, scale /= 10) {
+        char digit = value.data[i];
+        if (digit < '0' || digit > '9' || (whole == '1' && digit != '0')) {
+            return false;
+        }
+        thousandths += (unsigned)(digit - '0') * scale;
+    }
+    *weight = thousandths;
+    return true;
+}
+
+static bool language_matches(String range, String tag)
+{
+    String shorter = range.len < tag.len ? range : tag;
+    String longer = range.len < tag.len ? tag : range;
+    return str_equal_ignore_case(str_slice(longer, 0, shorter.len), shorter) &&
+           (longer.len == shorter.len || longer.data[shorter.len] == '-');
+}
+
+String http_negotiate_language(String accept, const String *offered, size_t count)
+{
+    assert(count > 0);
+    String chosen = offered[0];
+    unsigned chosen_weight = 0;
+    String rest = accept;
+    while (rest.len > 0) {
+        String element;
+        String parameter;
+        str_cut(rest, ',', &element, &rest);
+        bool weighted = str_cut(element, ';', &element, &parameter);
+        String range = str_trim(element);
+        unsigned weight = 1000;
+        if (range.len == 0 || (weighted && !language_weight(str_trim(parameter), &weight)) ||
+            weight <= chosen_weight) {
+            continue;
+        }
+        for (size_t i = 0; i < count; i++) {
+            if ((i == 0 && str_equal(range, S("*"))) || language_matches(range, offered[i])) {
+                chosen = offered[i];
+                chosen_weight = weight;
+                break;
+            }
+        }
+    }
+    return chosen;
 }
