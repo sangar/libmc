@@ -51,6 +51,15 @@ typedef enum HttpRangeResult {
 // server answer with the whole body.
 HttpRangeResult http_parse_range(String field, int64_t size, int64_t *first, int64_t *last);
 
+// http_negotiate_language returns the language tag of offered, count of them
+// with the default first, that the Accept-Language field accept ranks highest
+// by RFC 9110 12.4.2's weights, a tie going to the range listed first. A range
+// matches a tag equal to it in any ASCII case, or one of the two being the
+// other's prefix up to a hyphen: "en" matches "en-GB", and "nb-NO" matches
+// "nb". "*" matches the default. A range weighted 0 or malformed matches
+// nothing, and with no match the default is returned.
+String http_negotiate_language(String accept, const String *offered, size_t count);
+
 // HttpServerResponse comes to the handler as 200 with no headers or body. The
 // server adds Date, Content-Length and Connection, and leaves the body out
 // for HEAD, 204 and 304; a handler setting any of those three fields is a
