@@ -15,3 +15,10 @@ String base64_encode(Arena *arena, String data, Base64Alphabet alphabet);
 // that alphabet only, padded exactly when the alphabet pads, and with no
 // bits set past the last byte. No whitespace is skipped.
 bool base64_decode(Arena *arena, String text, Base64Alphabet alphabet, String *data);
+
+// base64_decode_lenient reads standard-alphabet text as mail needs it read
+// (RFC 2045 6.8) and decodes any text: it skips every character outside the
+// alphabet, such as line breaks, ends a group at each '=', so that encodings
+// joined after their padding decode, and drops the bits of a last group cut
+// short. The result is NUL-terminated.
+String base64_decode_lenient(Arena *arena, String text);

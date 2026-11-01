@@ -1,17 +1,12 @@
 #pragma once
 
 #include "mc/core/error.h"
+#include "mc/encoding/mail.h"
 #include "mc/text/str.h"
 
 // Sending mail over SMTP with TLS: libcurl on mbedTLS, pinned in deps.lock.
 // smtp_send builds the MIME message itself, so a caller only fills in a
 // MailMessage.
-
-// MailAddress is a mailbox: an address and an optional display name, which may be UTF-8.
-typedef struct MailAddress {
-    String name;
-    String address;
-} MailAddress;
 
 typedef struct MailAttachment {
     // filename is what the recipient sees, and may be UTF-8.

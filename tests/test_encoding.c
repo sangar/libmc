@@ -331,6 +331,20 @@ static void base64_refuses_malformed_text(Test *test)
     }
 }
 
+static void base64_decodes_mail_leniently(Test *test)
+{
+    static const struct {
+        const char *text;
+        const char *data;
+    } CASES[] = {
+        { "Zm9v\r\nYmFy\r\n", "foobar" }, { "Zm9vYg", "foob" }, { "Zm9vYg==Zm9v", "foobfoo" },
+        { "Zm 9v!", "foo" },                 { "Zm9vY", "foo" },  { "", "" },
+    };
+    for (size_t i = 0; i < countof(CASES); i++) {
+        test_check_str(test, base64_decode_lenient(test->arena, S(CASES[i].text)), S(CASES[i].data), CASES[i].text);
+    }
+}
+
 static void gzip_round_trips_with_and_without_a_comment(Test *test)
 {
     String text = str_repeat(test->arena, S("blåbær og bringebær, "), 200);
@@ -664,6 +678,7 @@ static void xml_rejects_malformed_and_hostile_documents(Test *test)
 const TestCase ENCODING_TESTS[] = {
     { "base64_round_trips_the_rfc_4648_examples", base64_round_trips_the_rfc_4648_examples },
     { "base64_refuses_malformed_text", base64_refuses_malformed_text },
+    { "base64_decodes_mail_leniently", base64_decodes_mail_leniently },
     { "gzip_round_trips_with_and_without_a_comment", gzip_round_trips_with_and_without_a_comment },
     { "gzip_refuses_malformed_and_oversized_data", gzip_refuses_malformed_and_oversized_data },
     { "json_parses_every_kind", json_parses_every_kind },
