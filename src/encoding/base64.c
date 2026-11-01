@@ -24,15 +24,20 @@ String base64_encode(Arena *arena, String data, Base64Alphabet alphabet)
     return str_builder_finish(&text);
 }
 
-// digit_value is c's value in digits, or -1 when it is not one of them.
+// digit_value is c's value in digits, or -1 when it is not one of them. Both
+// alphabets share their first 62 digits.
 static int digit_value(const char *digits, char c)
 {
-    for (int i = 0; i < 64; i++) {
-        if (digits[i] == c) {
-            return i;
-        }
+    if (c >= 'A' && c <= 'Z') {
+        return c - 'A';
     }
-    return -1;
+    if (c >= 'a' && c <= 'z') {
+        return c - 'a' + 26;
+    }
+    if (c >= '0' && c <= '9') {
+        return c - '0' + 52;
+    }
+    return c == digits[62] ? 62 : c == digits[63] ? 63 : -1;
 }
 
 bool base64_decode(Arena *arena, String text, Base64Alphabet alphabet, String *data)
@@ -74,4 +79,30 @@ bool base64_decode(Arena *arena, String text, Base64Alphabet alphabet, String *d
     }
     *data = (String){ (const char *)bytes, count };
     return true;
+}
+
+String base64_decode_lenient(Arena *arena, String text)
+{
+    unsigned char *bytes = arena_push(arena, text.len / 4 * 3 + 3);
+    size_t count = 0;
+    uint32_t bits = 0;
+    unsigned bit_count = 0;
+    for (size_t i = 0; i < text.len; i++) {
+        if (text.data[i] == '=') {
+            bits = 0;
+            bit_count = 0;
+            continue;
+        }
+        int value = digit_value(STANDARD, text.data[i]);
+        if (value < 0) {
+            continue;
+        }
+        bits = (bits << 6 | (uint32_t)value) & 0xFFFF;
+        bit_count += 6;
+        if (bit_count >= 8) {
+            bit_count -= 8;
+            bytes[count++] = (unsigned char)(bits >> bit_count);
+        }
+    }
+    return (String){ (const char *)bytes, count };
 }
