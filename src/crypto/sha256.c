@@ -1,5 +1,6 @@
 #include "mc/crypto/sha256.h"
 
+#include <assert.h>
 #include <string.h>
 
 enum { BLOCK_LEN = 64 };
@@ -126,7 +127,9 @@ void sha256(String data, uint8_t digest[SHA256_LEN])
     sha256_final(&hash, digest);
 }
 
-void hmac_sha256(String key, String data, uint8_t digest[SHA256_LEN])
+// hmac_keyed readies inner and outer, the two hashes HMAC-SHA256 with key
+// starts from, so a caller that runs many HMACs with one key pads it once.
+static void hmac_keyed(String key, Sha256 *inner, Sha256 *outer)
 {
     uint8_t block_key[BLOCK_LEN] = { 0 };
     if (key.len > BLOCK_LEN) {
@@ -140,16 +143,59 @@ void hmac_sha256(String key, String data, uint8_t digest[SHA256_LEN])
         inner_pad[i] = block_key[i] ^ 0x36;
         outer_pad[i] = block_key[i] ^ 0x5c;
     }
-    uint8_t inner[SHA256_LEN];
-    Sha256 hash;
-    sha256_init(&hash);
-    sha256_update(&hash, inner_pad, BLOCK_LEN);
-    sha256_update(&hash, data.data, data.len);
-    sha256_final(&hash, inner);
-    sha256_init(&hash);
-    sha256_update(&hash, outer_pad, BLOCK_LEN);
-    sha256_update(&hash, inner, SHA256_LEN);
-    sha256_final(&hash, digest);
+    sha256_init(inner);
+    sha256_update(inner, inner_pad, BLOCK_LEN);
+    sha256_init(outer);
+    sha256_update(outer, outer_pad, BLOCK_LEN);
+}
+
+// hmac_finish ends the HMAC whose inner hash has taken its data.
+static void hmac_finish(Sha256 inner, Sha256 outer, uint8_t digest[SHA256_LEN])
+{
+    uint8_t inner_digest[SHA256_LEN];
+    sha256_final(&inner, inner_digest);
+    sha256_update(&outer, inner_digest, SHA256_LEN);
+    sha256_final(&outer, digest);
+}
+
+void hmac_sha256(String key, String data, uint8_t digest[SHA256_LEN])
+{
+    Sha256 inner;
+    Sha256 outer;
+    hmac_keyed(key, &inner, &outer);
+    sha256_update(&inner, data.data, data.len);
+    hmac_finish(inner, outer, digest);
+}
+
+void pbkdf2_hmac_sha256(String password, String salt, uint32_t iterations, uint8_t *key, size_t len)
+{
+    assert(iterations > 0);
+    Sha256 inner;
+    Sha256 outer;
+    hmac_keyed(password, &inner, &outer);
+    for (uint32_t block = 1; len > 0; block++) {
+        const uint8_t counter[4] = { (uint8_t)(block >> 24), (uint8_t)(block >> 16), (uint8_t)(block >> 8),
+                                     (uint8_t)block };
+        Sha256 round = inner;
+        sha256_update(&round, salt.data, salt.len);
+        sha256_update(&round, counter, sizeof counter);
+        uint8_t u[SHA256_LEN];
+        hmac_finish(round, outer, u);
+        uint8_t t[SHA256_LEN];
+        memcpy(t, u, SHA256_LEN);
+        for (uint32_t i = 1; i < iterations; i++) {
+            round = inner;
+            sha256_update(&round, u, SHA256_LEN);
+            hmac_finish(round, outer, u);
+            for (size_t j = 0; j < SHA256_LEN; j++) {
+                t[j] ^= u[j];
+            }
+        }
+        size_t take = min_size(len, SHA256_LEN);
+        memcpy(key, t, take);
+        key += take;
+        len -= take;
+    }
 }
 
 String hex_encode(Arena *arena, const uint8_t *bytes, size_t len)

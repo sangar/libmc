@@ -139,7 +139,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/container/pool.h` | Items of one size freed one at a time, named by handles that go stale when freed |
 | | `mc/container/hash.h` | FNV-1a hashing |
 | | `mc/container/sort.h` | Stable merge sort and top-k selection with a comparator context |
-| crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, hex encoding |
+| crypto | `mc/crypto/sha256.h` | SHA-256, HMAC-SHA256, PBKDF2-HMAC-SHA256, hex encoding |
 | | `mc/crypto/md5.h` | MD5, for checksums that protocols still name, such as S3's ETag |
 | | `mc/crypto/crc32.h` | CRC-32 (IEEE, as zlib's) and CRC-32C (Castagnoli) |
 | | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing, and the signing key it derives |
