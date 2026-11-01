@@ -254,6 +254,25 @@ static void sha256_known_vectors(Test *test)
                    S("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), "RFC 4231 HMAC case 2");
 }
 
+static void pbkdf2_known_vectors(Test *test)
+{
+    uint8_t key[64];
+    pbkdf2_hmac_sha256(S("passwd"), S("salt"), 1, key, 64);
+    test_check_str(test, hex_encode(test->arena, key, 64),
+                   S("55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+                     "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"),
+                   "RFC 7914 case 1, two blocks");
+    pbkdf2_hmac_sha256(S("Password"), S("NaCl"), 80000, key, 64);
+    test_check_str(test, hex_encode(test->arena, key, 64),
+                   S("4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+                     "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"),
+                   "RFC 7914 case 2, 80,000 iterations");
+    pbkdf2_hmac_sha256(S("blåbærsyltetøy"), S("gasamedia"), 1000, key, 40);
+    test_check_str(test, hex_encode(test->arena, key, 40),
+                   S("470b3237cf1ad14895063c30984c2c729f04fb0f2b7e95dcb343f8d8068e1f6d8f26724f43439f67"),
+                   "a UTF-8 password, a key ending mid-block");
+}
+
 static void md5_known_vectors(Test *test)
 {
     uint8_t digest[MD5_LEN];
@@ -410,6 +429,7 @@ const TestCase TEXT_TESTS[] = {
     { "fmt_times_and_numbers", fmt_times_and_numbers },
     { "civil_dates_convert", civil_dates_convert },
     { "sha256_known_vectors", sha256_known_vectors },
+    { "pbkdf2_known_vectors", pbkdf2_known_vectors },
     { "md5_known_vectors", md5_known_vectors },
     { "crc32_check_values", crc32_check_values },
     { "sort_orders_and_selects", sort_orders_and_selects },
