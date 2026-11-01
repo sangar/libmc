@@ -260,6 +260,34 @@ static void http_fields_read_and_write(Test *test)
     test_check(test, http_parse_range(S("bytes=4-1"), 11, &first, &last) == HTTP_RANGE_NONE, "an end before the start");
 }
 
+static void http_negotiate_language_ranks_by_weight(Test *test)
+{
+    const String offered[] = { S("en"), S("nb"), S("nn"), S("no") };
+    size_t count = countof(offered);
+    test_check_str(test, http_negotiate_language(S("nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7"), offered, count), S("nb"),
+                   "a regional range matches its language");
+    test_check_str(test, http_negotiate_language(S("en-US,en;q=0.9,nb;q=0.8"), offered, count), S("en"),
+                   "the first language when it weighs most");
+    test_check_str(test, http_negotiate_language(S("da, en-GB;q=0.7 , nb ; q=0.9"), offered, count), S("nb"),
+                   "a later range that weighs more, spaces around it");
+    test_check_str(test, http_negotiate_language(S("nn;q=0.5,no;q=0.5"), offered, count), S("nn"),
+                   "a tie goes to the range listed first");
+    test_check_str(test, http_negotiate_language(S("NB-no"), offered, count), S("nb"), "any ASCII case");
+    test_check_str(test, http_negotiate_language(S("de-DE,fr;q=0.8"), offered, count), S("en"), "no match");
+    test_check_str(test, http_negotiate_language(S(""), offered, count), S("en"), "an empty field");
+    test_check_str(test, http_negotiate_language(S("nbx,nb;q=0.1"), offered, count), S("nb"),
+                   "a range that only starts like a tag");
+    test_check_str(test, http_negotiate_language(S("*;q=0.5,nn;q=0.4"), offered, count), S("en"),
+                   "the wildcard is the default");
+    test_check_str(test, http_negotiate_language(S("nb;q=0,nn;q=0.2"), offered, count), S("nn"),
+                   "a range weighted 0");
+    test_check_str(test, http_negotiate_language(S("nb;q=1.5,nb;q=0.9x,nb;level=1,nn;q=0.001"), offered, count), S("nn"),
+                   "malformed weights");
+    const String regional[] = { S("en"), S("pt-BR") };
+    test_check_str(test, http_negotiate_language(S("pt"), regional, countof(regional)), S("pt-BR"),
+                   "a language matches its regional tag");
+}
+
 static void http_server_answers_500_for_failures(Test *test)
 {
     test_check(test, str_starts_with(exchange_request(test, S("GET /fail HTTP/1.1\r\nHost: h\r\n\r\n")), S("HTTP/1.1 500 ")),
@@ -840,6 +868,7 @@ const TestCase HTTP_SERVER_TESTS[] = {
     { "http_server_refuses_ambiguous_requests", http_server_refuses_ambiguous_requests },
     { "http_server_gzips_what_is_worth_it", http_server_gzips_what_is_worth_it },
     { "http_fields_read_and_write", http_fields_read_and_write },
+    { "http_negotiate_language_ranks_by_weight", http_negotiate_language_ranks_by_weight },
     { "http_server_answers_500_for_failures", http_server_answers_500_for_failures },
     { "http_server_exchanges_http2_with_prior_knowledge", http_server_exchanges_http2_with_prior_knowledge },
     { "http_server_continues_and_answers_head", http_server_continues_and_answers_head },
