@@ -5,6 +5,8 @@
 #include "mc/platform/platform.h"
 #include "watch_backend.h"
 
+#include <assert.h>
+
 enum { SETTLE_LIMIT = 8 };
 
 struct Watch {
@@ -68,6 +70,7 @@ static int milliseconds_until(int64_t deadline_ns)
 // append_distinct appends each path in raw to events once, with rescan if any of its events asked for it.
 static void append_distinct(Arena *arena, Arena *scratch, WatchEventList raw, WatchEventList *events)
 {
+    assert(arena != scratch);
     StrMap *positions = strmap_create(scratch, raw.count);
     for (size_t i = 0; i < raw.count; i++) {
         size_t position = (size_t)strmap_get(positions, raw.items[i].path);
