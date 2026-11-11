@@ -8,6 +8,7 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/psa_util.h>
 #include <mbedtls/ssl.h>
+#include <mbedtls/ssl_ticket.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/x509_csr.h>
 #include <psa/crypto.h>
@@ -47,6 +48,7 @@ struct TlsServer {
     Arena *arena;
     const char **protocols; // what ALPN offers, nullptr-terminated, for as long as config
     mbedtls_ssl_config config;
+    mbedtls_ssl_ticket_context tickets;
     Mutex mutex; // guards current and the challenges
     Credentials *current;
     Credentials *challenges[MAX_CHALLENGES];
@@ -168,6 +170,7 @@ static int present_certificate(mbedtls_ssl_context *ssl)
 static void server_free(TlsServer *server)
 {
     mbedtls_ssl_config_free(&server->config);
+    mbedtls_ssl_ticket_free(&server->tickets);
     mutex_destroy(&server->mutex);
     arena_destroy(server->arena);
 }
@@ -202,12 +205,20 @@ Error tls_server_create(const TlsServerConfig *config, TlsServer **server, Err *
     created->current = credentials;
     mutex_init(&created->mutex);
     mbedtls_ssl_config_init(&created->config);
+    mbedtls_ssl_ticket_init(&created->tickets);
     int status = mbedtls_ssl_config_defaults(&created->config, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM,
                                              MBEDTLS_SSL_PRESET_DEFAULT);
     if (status == 0) {
         mbedtls_ssl_conf_min_tls_version(&created->config, MBEDTLS_SSL_VERSION_TLS1_2);
         mbedtls_ssl_conf_cert_cb(&created->config, present_certificate);
         status = mbedtls_ssl_conf_alpn_protocols(&created->config, created->protocols);
+    }
+    if (status == 0) {
+        status = mbedtls_ssl_ticket_setup(&created->tickets, PSA_ALG_GCM, PSA_KEY_TYPE_AES, 256, SECONDS_PER_DAY);
+    }
+    if (status == 0) {
+        mbedtls_ssl_conf_session_tickets_cb(&created->config, mbedtls_ssl_ticket_write, mbedtls_ssl_ticket_parse,
+                                            &created->tickets);
     }
     if (status != 0) {
         credentials_release(credentials);
@@ -642,7 +653,14 @@ String tls_protocol(const TlsConnection *connection)
 
 Error tls_read(TlsConnection *connection, void *buffer, size_t capacity, size_t *got, Err *err)
 {
-    int status = mbedtls_ssl_read(&connection->session->ssl, buffer, capacity);
+    // mbedtls_ssl_read returns without data after a record that holds none,
+    // such as the TLS 1.3 session ticket OpenSSL servers send after the
+    // handshake. The socket blocks, so there is nothing to wait for but more
+    // records.
+    int status = 0;
+    do {
+        status = mbedtls_ssl_read(&connection->session->ssl, buffer, capacity);
+    } while (status == MBEDTLS_ERR_SSL_WANT_READ || status == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET);
     *got = status > 0 ? (size_t)status : 0;
     if (status >= 0 || status == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
         return ERR_OK;
