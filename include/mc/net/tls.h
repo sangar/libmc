@@ -23,7 +23,8 @@ typedef struct TlsServerConfig {
     size_t protocol_count;
 } TlsServerConfig;
 
-// tls_server_create copies config. It offers TLS 1.2 and 1.3. A certificate
+// tls_server_create copies config. It offers TLS 1.2 and 1.3, and issues
+// session tickets, valid for a day, so that a client can resume. A certificate
 // or key that does not parse, or a key that is not the certificate's, is
 // ERR_PLATFORM. The caller owns the server.
 [[nodiscard]] Error tls_server_create(const TlsServerConfig *config, TlsServer **server, Err *err);
