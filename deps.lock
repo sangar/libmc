@@ -14,3 +14,5 @@ md4c 0.6.0 https://github.com/sangar/libmc/releases/download/deps-md4c-0.6.0/md4
 expat 2.9.0 https://github.com/sangar/libmc/releases/download/deps-expat-2.9.0/expat-2.9.0.tar.gz sha256:b945ea1eb004cb8faee7ca93a7bc62c45d13a65a98767b621d0081372e93816e
 # llhttp: upstream 9.4.3 with src/llhttp.c patched to refuse more than one space between the parts of the request line, as RFC 9112 3 asks; httpbed's conformance suite tests it.
 llhttp 9.4.3-single-spaces https://github.com/sangar/libmc/releases/download/deps-llhttp-9.4.3-single-spaces/llhttp-9.4.3-single-spaces.tar.gz sha256:25c64821ed326b1f964022574fc01483e14a6e637ec6606aa6bea1b641f5ef8b
+# c-ares: include/ares_build.h is the one tools/c-ares-config.sh has c-ares's CMake write, the same on macOS and Linux; the sources of Windows and Android are left out.
+c-ares 1.34.9 https://github.com/sangar/libmc/releases/download/deps-c-ares-1.34.9/c-ares-1.34.9.tar.gz sha256:e6293d239c4e5c54920250f34859c9395c806883135916d2db1b19d61ac7f90d
