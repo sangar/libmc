@@ -419,6 +419,33 @@ static void network_listens_on_ipv4_and_ipv6_with_no_host(Test *test)
     net_close(listener);
 }
 
+// network_names_the_peer checks the server's view of a client against the
+// client's own.
+static void network_names_the_peer(Test *test)
+{
+    int listener = -1;
+    int client = -1;
+    int accepted = -1;
+    String listening = { 0 };
+    String host = { 0 };
+    String port = { 0 };
+    String client_address = { 0 };
+    String peer = { 0 };
+    Err err = { 0 };
+    test_check(test, net_listen(S("127.0.0.1:0"), &listener, &err) == ERR_OK, "listen");
+    test_check(test, net_local_address(test->arena, listener, &listening, &err) == ERR_OK, "its address");
+    str_cut(listening, ':', &host, &port);
+    test_check(test, net_connect(host, port, 1000, &client, &err) == ERR_OK, "connect");
+    test_check(test, net_accept(listener, 1000, &accepted), "accept");
+    test_check(test, net_local_address(test->arena, client, &client_address, &err) == ERR_OK, "the client's address");
+    test_check(test, net_peer_address(test->arena, accepted, &peer, &err) == ERR_OK, "the peer's address");
+    test_check(test, peer.len > 0 && str_equal(peer, client_address), "the peer is the client");
+    test_check(test, net_peer_address(test->arena, listener, &peer, &err) == ERR_NETWORK, "a listener has no peer");
+    net_close(accepted);
+    net_close(client);
+    net_close(listener);
+}
+
 static const DirEntry *find_entry(const DirEntryList *entries, String name)
 {
     for (size_t i = 0; i < entries->count; i++) {
@@ -986,6 +1013,7 @@ static void frames_cross_a_socket_whole(Test *test)
 }
 
 const TestCase PLATFORM_TESTS[] = {
+    { "network_names_the_peer", network_names_the_peer },
     { "files_round_trip_in_a_temp_dir", files_round_trip_in_a_temp_dir },
     { "file_read_all_sizes_its_buffer", file_read_all_sizes_its_buffer },
     { "file_sync_makes_writes_durable", file_sync_makes_writes_durable },

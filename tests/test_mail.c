@@ -173,6 +173,17 @@ static void mail_reads_dates(Test *test)
     }
 }
 
+static void mail_formats_dates(Test *test)
+{
+    const int64_t nine = 1704099600 * (int64_t)NS_PER_SECOND; // 2024-01-01 09:00:00 UTC, a Monday
+    test_check(test, str_equal(mail_format_date(test->arena, nine), S("Mon, 01 Jan 2024 09:00:00 +0000")), "a Monday");
+    test_check(test, str_equal(mail_format_date(test->arena, 0), S("Thu, 01 Jan 1970 00:00:00 +0000")), "the epoch");
+    int64_t leap = 1709251199 * (int64_t)NS_PER_SECOND + 999999999; // the last nanosecond of 29 Feb 2024
+    test_check(test, str_equal(mail_format_date(test->arena, leap), S("Thu, 29 Feb 2024 23:59:59 +0000")),
+               "a leap day, the nanoseconds dropped");
+    test_check(test, date_of(test, mail_format_date(test->arena, leap)) == leap - 999999999, "mail_parse reads it back");
+}
+
 static void mail_reads_message_ids(Test *test)
 {
     ParsedMail message = parse_mail(test, "Message-ID:  <abc@example.no> \r\n"
@@ -402,6 +413,7 @@ const TestCase MAIL_TESTS[] = {
     { "mail_decodes_encoded_words", mail_decodes_encoded_words },
     { "mail_reads_address_lists", mail_reads_address_lists },
     { "mail_reads_dates", mail_reads_dates },
+    { "mail_formats_dates", mail_formats_dates },
     { "mail_reads_message_ids", mail_reads_message_ids },
     { "mail_reads_parameters_and_file_names", mail_reads_parameters_and_file_names },
     { "mail_walks_multipart_trees", mail_walks_multipart_trees },

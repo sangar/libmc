@@ -954,3 +954,18 @@ ParsedMail mail_parse(Arena *arena, String raw)
     message.html = first_body(walk.parts, walk.count, S("text/html"));
     return message;
 }
+
+String mail_format_date(Arena *arena, int64_t unix_nanoseconds)
+{
+    static const char *const WEEKDAYS[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *const MONTHS[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    int64_t seconds = unix_nanoseconds / NS_PER_SECOND;
+    int64_t days = seconds / SECONDS_PER_DAY;
+    int64_t second_of_day = seconds % SECONDS_PER_DAY;
+    CivilDate date = civil_from_days(days);
+    // 1 January 1970 was a Thursday.
+    return str_format(arena, "%s, %02u %s %04lld %02lld:%02lld:%02lld +0000", WEEKDAYS[(days + 4) % 7], date.day,
+                      MONTHS[date.month - 1], (long long)date.year, (long long)(second_of_day / 3600),
+                      (long long)(second_of_day / 60 % 60), (long long)(second_of_day % 60));
+}

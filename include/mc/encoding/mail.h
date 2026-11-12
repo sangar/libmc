@@ -103,6 +103,11 @@ typedef struct ParsedMail {
 // 512th.
 ParsedMail mail_parse(Arena *arena, String raw);
 
+// mail_format_date writes a Unix time in nanoseconds, from 1970 on, as an
+// RFC 5322 date-time in UTC, such as Mon, 01 Jan 2024 09:00:00 +0000, for a
+// Date or Received field; the nanoseconds within the second are dropped.
+String mail_format_date(Arena *arena, int64_t unix_nanoseconds);
+
 // mail_decode_words decodes the RFC 2047 encoded words in a header value, B
 // and Q in any charset above, to UTF-8 in NFC, in arena. It drops the
 // whitespace between adjacent words and joins the bytes of adjacent words in
