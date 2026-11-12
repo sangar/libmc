@@ -1981,6 +1981,24 @@ Error net_local_address(Arena *arena, int fd, String *address, Err *err)
     return ERR_OK;
 }
 
+Error net_peer_address(Arena *arena, int fd, String *address, Err *err)
+{
+    struct sockaddr_storage peer;
+    socklen_t len = sizeof peer;
+    if (getpeername(fd, (struct sockaddr *)&peer, &len) != 0) {
+        return err_set(err, ERR_NETWORK, "getpeername: %s", strerror(errno));
+    }
+    char host[NI_MAXHOST];
+    char port[NI_MAXSERV];
+    int rc = getnameinfo((struct sockaddr *)&peer, len, host, sizeof host, port, sizeof port,
+                         NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc != 0) {
+        return err_set(err, ERR_NETWORK, "getnameinfo: %s", gai_strerror(rc));
+    }
+    *address = str_format(arena, "%s:%s", host, port);
+    return ERR_OK;
+}
+
 // listen_on listens on the first of addresses of family, or of any family
 // for AF_UNSPEC, that takes it, and gives its socket or -1. An IPv6 socket
 // takes IPv4 connections too, where the system allows it.

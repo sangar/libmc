@@ -14,12 +14,7 @@ enum {
     DEFAULT_TIMEOUT_MS = 60 * 1000,
     // An RFC 2047 word is at most 75 characters, of which =?UTF-8?Q? and ?= take 12.
     MAX_ENCODED_TEXT = 63,
-    SECONDS_PER_DAY = 86400,
 };
-
-static const char *const WEEKDAYS[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-static const char *const MONTHS[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 // Mail holds what curl reads during the transfer; failed records any curl call that ran out of memory.
 typedef struct Mail {
@@ -210,22 +205,10 @@ static void add_recipients(Mail *mail, const MailAddress *mailboxes, size_t coun
     }
 }
 
-// rfc5322_date writes a Unix time in UTC as Sat, 24 Oct 2026 12:00:00 +0000.
-static String rfc5322_date(Arena *arena, int64_t unix_seconds)
-{
-    int64_t days = unix_seconds / SECONDS_PER_DAY;
-    int64_t second_of_day = unix_seconds % SECONDS_PER_DAY;
-    CivilDate date = civil_from_days(days);
-    // 1 January 1970 was a Thursday.
-    return str_format(arena, "%s, %02u %s %04lld %02lld:%02lld:%02lld +0000", WEEKDAYS[(days + 4) % 7], date.day,
-                      MONTHS[date.month - 1], (long long)date.year, (long long)(second_of_day / 3600),
-                      (long long)(second_of_day / 60 % 60), (long long)(second_of_day % 60));
-}
-
 static void add_headers(Mail *mail, const MailMessage *message)
 {
     int64_t now = clock_wall_ns();
-    add_line(mail, &mail->headers, str_format(mail->arena, "Date: %s", rfc5322_date(mail->arena, now / NS_PER_SECOND).data));
+    add_line(mail, &mail->headers, str_format(mail->arena, "Date: %s", mail_format_date(mail->arena, now).data));
     String domain = { 0 };
     String local = { 0 };
     str_cut(message->from.address, '@', &local, &domain);

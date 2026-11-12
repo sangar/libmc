@@ -277,6 +277,10 @@ void signal_watch_stop(SignalWatch *watch);
 // net_local_address is the host:port fd is bound to, with the port chosen
 // when it listened on port 0, in the form net_listen and net_connect take.
 [[nodiscard]] Error net_local_address(Arena *arena, int fd, String *address, Err *err);
+// net_peer_address is the host:port of the other end of the connected socket
+// fd, in the form net_local_address gives; a socket with no peer is
+// ERR_NETWORK.
+[[nodiscard]] Error net_peer_address(Arena *arena, int fd, String *address, Err *err);
 // net_accept waits up to timeout_ms for a connection and reports whether one arrived.
 bool net_accept(int listener, int timeout_ms, int *client);
 // net_connect is ERR_NETWORK when the host cannot be resolved or reached within timeout_ms.
