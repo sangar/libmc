@@ -1999,10 +1999,11 @@ Error net_peer_address(Arena *arena, int fd, String *address, Err *err)
     return ERR_OK;
 }
 
-// listen_on listens on the first of addresses of family, or of any family
-// for AF_UNSPEC, that takes it, and gives its socket or -1. An IPv6 socket
-// takes IPv4 connections too, where the system allows it.
-static int listen_on(const struct addrinfo *addresses, int family, int *failure)
+// bind_to binds the first of addresses of family, or of any family for
+// AF_UNSPEC, that takes it, listens on it when it is a stream socket, and
+// gives its socket or -1. An IPv6 socket takes IPv4 too, where the system
+// allows it.
+static int bind_to(const struct addrinfo *addresses, int family, int *failure)
 {
     for (const struct addrinfo *a = addresses; a != nullptr; a = a->ai_next) {
         if (family != AF_UNSPEC && a->ai_family != family) {
@@ -2019,7 +2020,7 @@ static int listen_on(const struct addrinfo *addresses, int family, int *failure)
             unused(setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero));
         }
         if (!prepare_socket(sock) || setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
-            bind(sock, a->ai_addr, a->ai_addrlen) != 0 || listen(sock, 64) != 0) {
+            bind(sock, a->ai_addr, a->ai_addrlen) != 0 || (a->ai_socktype == SOCK_STREAM && listen(sock, 64) != 0)) {
             *failure = errno;
             close(sock);
             continue;
@@ -2029,7 +2030,7 @@ static int listen_on(const struct addrinfo *addresses, int family, int *failure)
     return -1;
 }
 
-Error net_listen(String address, int *fd, Err *err)
+[[nodiscard]] static Error bind_address(String address, int socktype, int *fd, Err *err)
 {
     *fd = -1;
     size_t colon;
@@ -2045,7 +2046,7 @@ Error net_listen(String address, int *fd, Err *err)
     if (e != ERR_OK) {
         return e;
     }
-    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM, .ai_flags = AI_PASSIVE };
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = socktype, .ai_flags = AI_PASSIVE };
     struct addrinfo *addresses;
     int rc = getaddrinfo(host.text[0] != '\0' ? host.text : nullptr, port.text, &hints, &addresses);
     if (rc != 0) {
@@ -2055,14 +2056,52 @@ Error net_listen(String address, int *fd, Err *err)
     // With no host, an IPv6 socket that also takes IPv4 comes first, so both
     // reach the server; glibc lists IPv4's wildcard first.
     if (host.text[0] == '\0') {
-        *fd = listen_on(addresses, AF_INET6, &failure);
+        *fd = bind_to(addresses, AF_INET6, &failure);
     }
     if (*fd < 0) {
-        *fd = listen_on(addresses, AF_UNSPEC, &failure);
+        *fd = bind_to(addresses, AF_UNSPEC, &failure);
     }
     freeaddrinfo(addresses);
     if (*fd < 0) {
         return err_set(err, ERR_NETWORK, "listen %s:%s: %s", host.text, port.text, strerror(failure));
+    }
+    return ERR_OK;
+}
+
+Error net_listen(String address, int *fd, Err *err)
+{
+    return bind_address(address, SOCK_STREAM, fd, err);
+}
+
+Error net_listen_udp(String address, int *fd, Err *err)
+{
+    return bind_address(address, SOCK_DGRAM, fd, err);
+}
+
+static_assert(sizeof(((NetPeer *)nullptr)->address) >= sizeof(struct sockaddr_storage));
+
+Error net_receive_from(int fd, int timeout_ms, void *buffer, size_t capacity, size_t *got, NetPeer *peer, Err *err)
+{
+    *got = 0;
+    struct pollfd ready = { .fd = fd, .events = POLLIN };
+    int polled = poll(&ready, 1, timeout_ms);
+    if (polled == 0) {
+        return err_set(err, ERR_TIMEOUT, "receive: no datagram within %d ms", timeout_ms);
+    }
+    socklen_t len = sizeof peer->address;
+    ssize_t n = polled > 0 ? recvfrom(fd, buffer, capacity, 0, (struct sockaddr *)peer->address, &len) : -1;
+    if (n < 0) {
+        return err_set(err, ERR_NETWORK, "receive: %s", strerror(errno));
+    }
+    *got = (size_t)n;
+    peer->len = (uint32_t)len;
+    return ERR_OK;
+}
+
+Error net_send_to(int fd, String data, const NetPeer *peer, Err *err)
+{
+    if (sendto(fd, data.data, data.len, 0, (const struct sockaddr *)peer->address, (socklen_t)peer->len) < 0) {
+        return err_set(err, ERR_NETWORK, "send: %s", strerror(errno));
     }
     return ERR_OK;
 }

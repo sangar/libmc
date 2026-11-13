@@ -30,7 +30,7 @@
 
 extern char **environ;
 
-enum { MAX_ARGS = 1024, MAX_FILES = 512, MAX_JOBS = 16, PATH_MAX_LEN = 1024, FINGERPRINT_LEN = 16384 };
+enum { MAX_ARGS = 1024, MAX_FILES = 1024, MAX_JOBS = 16, PATH_MAX_LEN = 1024, FINGERPRINT_LEN = 16384 };
 
 typedef struct {
     const char *items[MAX_ARGS];
@@ -80,8 +80,9 @@ typedef struct {
     size_t directory_count;
     const char *const *flags;
     size_t flag_count;
-    // curl_config adds src/net/curl/<os>, which holds the system's curl_config.h.
-    bool curl_config;
+    // system_config is the directory whose <os>/ holds the library's configuration for the system, as
+    // tools/curl-config.sh and tools/c-ares-config.sh write it; NULL for a library that needs none.
+    const char *system_config;
 } Dependency;
 
 static const char *const CYAML_DIRECTORIES[] = { "deps/cyaml" };
@@ -125,6 +126,16 @@ static const char *const EXPAT_FLAGS[] = { "-std=c11", "-w", "-Isrc/encoding", "
 // HAVE_UNISTD_H is what zlib's configure step finds on macOS and Linux.
 static const char *const ZLIB_FLAGS[] = { "-std=c11", "-w", "-DHAVE_UNISTD_H=1" };
 
+static const char *const CARES_DIRECTORIES[] = {
+    "deps/c-ares/src/lib",        "deps/c-ares/src/lib/dsa", "deps/c-ares/src/lib/event", "deps/c-ares/src/lib/legacy",
+    "deps/c-ares/src/lib/record", "deps/c-ares/src/lib/str", "deps/c-ares/src/lib/util",
+};
+#define CARES_PUBLIC_FLAGS "-Ideps/c-ares/include", "-DCARES_STATICLIB"
+static const char *const CARES_FLAGS[] = {
+    "-std=gnu11", "-w", CARES_PUBLIC_FLAGS, "-DHAVE_CONFIG_H", "-DCARES_BUILDING_LIBRARY",
+    "-Ideps/c-ares/src/lib", "-Ideps/c-ares/src/lib/include",
+};
+
 static const char *const CURL_DIRECTORIES[] = {
     "deps/curl/lib", "deps/curl/lib/curlx", "deps/curl/lib/vauth", "deps/curl/lib/vdns",
     "deps/curl/lib/vquic", "deps/curl/lib/vssh", "deps/curl/lib/vtls",
@@ -141,39 +152,44 @@ static const char *const CURL_FLAGS[] = {
 static const char *const LIBMC_FLAGS[] = {
     "-Iinclude", "-Ideps/cyaml", "-Ideps/utf8proc", "-Ideps/yyjson", "-Ideps/curl/include", "-DCURL_STATICLIB",
     "-Ideps/cacert", "-Ideps/md4c", "-Ideps/expat/lib", "-Ideps/llhttp/include", "-Ideps/zlib", MBEDTLS_PUBLIC_FLAGS,
-    NGHTTP2_PUBLIC_FLAGS,
+    NGHTTP2_PUBLIC_FLAGS, CARES_PUBLIC_FLAGS,
 };
 
 static const Dependency DEPENDENCIES[] = {
     { CYAML_DIRECTORIES, sizeof CYAML_DIRECTORIES / sizeof *CYAML_DIRECTORIES, C11_FLAGS,
-      sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
+      sizeof C11_FLAGS / sizeof *C11_FLAGS, NULL },
     { UTF8PROC_DIRECTORIES, sizeof UTF8PROC_DIRECTORIES / sizeof *UTF8PROC_DIRECTORIES, C11_FLAGS,
-      sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
+      sizeof C11_FLAGS / sizeof *C11_FLAGS, NULL },
     { YYJSON_DIRECTORIES, sizeof YYJSON_DIRECTORIES / sizeof *YYJSON_DIRECTORIES, C11_FLAGS,
-      sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
+      sizeof C11_FLAGS / sizeof *C11_FLAGS, NULL },
     { MBEDTLS_DIRECTORIES, sizeof MBEDTLS_DIRECTORIES / sizeof *MBEDTLS_DIRECTORIES, MBEDTLS_FLAGS,
-      sizeof MBEDTLS_FLAGS / sizeof *MBEDTLS_FLAGS, false },
+      sizeof MBEDTLS_FLAGS / sizeof *MBEDTLS_FLAGS, NULL },
     { NGHTTP2_DIRECTORIES, sizeof NGHTTP2_DIRECTORIES / sizeof *NGHTTP2_DIRECTORIES, NGHTTP2_FLAGS,
-      sizeof NGHTTP2_FLAGS / sizeof *NGHTTP2_FLAGS, false },
+      sizeof NGHTTP2_FLAGS / sizeof *NGHTTP2_FLAGS, NULL },
     { ZLIB_DIRECTORIES, sizeof ZLIB_DIRECTORIES / sizeof *ZLIB_DIRECTORIES, ZLIB_FLAGS,
-      sizeof ZLIB_FLAGS / sizeof *ZLIB_FLAGS, false },
+      sizeof ZLIB_FLAGS / sizeof *ZLIB_FLAGS, NULL },
     { CACERT_DIRECTORIES, sizeof CACERT_DIRECTORIES / sizeof *CACERT_DIRECTORIES, C11_FLAGS,
-      sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
+      sizeof C11_FLAGS / sizeof *C11_FLAGS, NULL },
     { MD4C_DIRECTORIES, sizeof MD4C_DIRECTORIES / sizeof *MD4C_DIRECTORIES, C11_FLAGS,
-      sizeof C11_FLAGS / sizeof *C11_FLAGS, false },
+      sizeof C11_FLAGS / sizeof *C11_FLAGS, NULL },
     { EXPAT_DIRECTORIES, sizeof EXPAT_DIRECTORIES / sizeof *EXPAT_DIRECTORIES, EXPAT_FLAGS,
-      sizeof EXPAT_FLAGS / sizeof *EXPAT_FLAGS, false },
+      sizeof EXPAT_FLAGS / sizeof *EXPAT_FLAGS, NULL },
     { LLHTTP_DIRECTORIES, sizeof LLHTTP_DIRECTORIES / sizeof *LLHTTP_DIRECTORIES, LLHTTP_FLAGS,
-      sizeof LLHTTP_FLAGS / sizeof *LLHTTP_FLAGS, false },
+      sizeof LLHTTP_FLAGS / sizeof *LLHTTP_FLAGS, NULL },
     { CURL_DIRECTORIES, sizeof CURL_DIRECTORIES / sizeof *CURL_DIRECTORIES, CURL_FLAGS,
-      sizeof CURL_FLAGS / sizeof *CURL_FLAGS, true },
+      sizeof CURL_FLAGS / sizeof *CURL_FLAGS, "src/net/curl" },
+    { CARES_DIRECTORIES, sizeof CARES_DIRECTORIES / sizeof *CARES_DIRECTORIES, CARES_FLAGS,
+      sizeof CARES_FLAGS / sizeof *CARES_FLAGS, "src/net/c-ares" },
 };
 
 // DEPENDENCY_INPUTS shape what the dependencies compile to: deps.lock pins their sources and headers, and the
 // rest is their configuration that lives in libmc. A change to any of them rebuilds everything.
 static const char *const DEPENDENCY_INPUTS[] = {
     "deps.lock", "src/net/mbedtls_user_config.h", "src/encoding/expat_config.h", "src/net/curl/linux/curl_config.h",
-    "src/net/curl/macos/curl_config.h", "src/net/curl/macos/sdk/SystemConfiguration/SCDynamicStoreCopySpecific.h",
+    "src/net/curl/macos/curl_config.h", "src/net/macos-sdk/SystemConfiguration/SCDynamicStoreCopySpecific.h",
+    "src/net/macos-sdk/SystemConfiguration/SCNetworkConfiguration.h", "src/net/macos-sdk/arpa/nameser.h",
+    "src/net/macos-sdk/arpa/nameser_compat.h", "src/net/macos-sdk/notify.h", "src/net/c-ares/linux/ares_config.h",
+    "src/net/c-ares/macos/ares_config.h",
 };
 
 static void command_push(Command *command, const char *item)
@@ -291,8 +307,8 @@ typedef struct {
     const Target *target;
     char out_dir[PATH_MAX_LEN];
     char obj_dir[PATH_MAX_LEN];
-    // curl_config_flag is -I for the curl configuration of the target's system.
-    char curl_config_flag[PATH_MAX_LEN];
+    // system_config_flag is -I for the dependency's configuration for the target's system.
+    char system_config_flag[PATH_MAX_LEN];
     time_t headers_mtime;
 } Build;
 
@@ -356,14 +372,14 @@ static void push_compile_command(Command *command, const Build *build)
     push_compiler(command, build);
     if (build->dependency != NULL) {
         command_push_many(command, build->dependency->flags, build->dependency->flag_count);
-        if (build->dependency->curl_config) {
-            command_push(command, build->curl_config_flag);
-            // curl's CMake defines _GNU_SOURCE on Linux: glibc declares accept4 and memrchr only with it.
+        if (build->dependency->system_config != NULL) {
+            command_push(command, build->system_config_flag);
+            // curl's and c-ares's CMake define _GNU_SOURCE on Linux: glibc declares accept4 and memrchr only with it.
             if (strcmp(build_os(build), "linux") == 0) {
                 command_push(command, "-D_GNU_SOURCE");
             } else {
                 command_push(command, "-idirafter");
-                command_push(command, "src/net/curl/macos/sdk");
+                command_push(command, "src/net/macos-sdk");
             }
         }
     } else {
@@ -967,6 +983,8 @@ static void build_library(const Build *build, FileList *objects, char *library_o
     for (size_t i = 0; i < sizeof DEPENDENCIES / sizeof *DEPENDENCIES; i++) {
         dependencies[i] = *build;
         dependencies[i].dependency = &DEPENDENCIES[i];
+        snprintf(dependencies[i].system_config_flag, sizeof dependencies[i].system_config_flag, "-I%s/%s",
+                 DEPENDENCIES[i].system_config != NULL ? DEPENDENCIES[i].system_config : "", build_os(build));
         for (size_t d = 0; d < DEPENDENCIES[i].directory_count; d++) {
             compile_directory(&dependencies[i], DEPENDENCIES[i].directories[d], objects, jobs);
         }
@@ -1037,7 +1055,6 @@ static void configure(Build *build, Flavor flavor, const Target *target)
     build->flavor = flavor;
     build->dependency = NULL;
     build->target = target;
-    snprintf(build->curl_config_flag, sizeof build->curl_config_flag, "-Isrc/net/curl/%s", build_os(build));
     build->headers_mtime = newest_header_mtime();
     snprintf(build->out_dir, sizeof build->out_dir, "out/%s%s%s", target != NULL ? target->name : "",
              target != NULL ? "/" : "", FLAVOR_NAMES[flavor]);

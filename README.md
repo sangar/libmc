@@ -7,7 +7,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 - **Arena allocation.** Allocations are freed together, and scratch work is undone with mark and release.
 - **Strings as views.** A `String` is a pointer and a length, and every function that allocates one takes an `Arena`.
 - **One error model.** Fallible functions return an `Error` code and can fill in an optional message.
-- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, [md4c](https://github.com/mity/md4c) for Markdown, [Expat](https://libexpat.github.io) for XML, [llhttp](https://github.com/nodejs/llhttp) for the HTTP server and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP, mail and FTP, with [Mozilla's trusted roots](https://curl.se/docs/caextract.html) for systems that have none, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
+- **Nothing to install** beyond libc, libm and pthreads, and no global state for the caller to manage. Its libraries, [yyjson](https://github.com/ibireme/yyjson) for JSON, [cyaml](https://github.com/andrewmd5/cyaml) for YAML, [utf8proc](https://github.com/JuliaStrings/utf8proc) for Unicode, [md4c](https://github.com/mity/md4c) for Markdown, [Expat](https://libexpat.github.io) for XML, [llhttp](https://github.com/nodejs/llhttp) for the HTTP server, [c-ares](https://c-ares.org) for DNS and [curl](https://curl.se) on [mbedTLS](https://github.com/Mbed-TLS/mbedtls), [nghttp2](https://nghttp2.org) and [zlib](https://zlib.net) for HTTP, mail and FTP, with [Mozilla's trusted roots](https://curl.se/docs/caextract.html) for systems that have none, are pinned in `deps.lock`, fetched by the build and built into `libmc.a`.
 - **Terminal output** with colours that fall back to what the terminal shows, boxes and joins as in Lip Gloss, spinners, springs, progress bars and lists redrawn in place, and a full-screen cell grid with graphs.
 - **A platform layer** for the clock, threads, files, directories, processes, environment, signals, sockets, file watching, login services, the terminal, pseudo-terminals and system statistics.
 - **JSON and YAML** parsing into one document tree, and JSON encoding back, with numbers read the same whatever locale the program set.
@@ -24,7 +24,7 @@ A small foundation library for C: arenas, length-carrying strings, one error mod
 
 Windows is not supported until `src/platform/` has a Windows implementation.
 
-Cross builds of the macOS library need no macOS SDK: `src/platform/watch_darwin.c` declares the few FSEvents functions it calls, and where the SDK is present the compiler checks those declarations against its headers. `src/net/curl/macos/sdk/` does the same for the two SystemConfiguration calls curl makes; the build searches it after the SDK.
+Cross builds of the macOS library need no macOS SDK: `src/platform/watch_darwin.c` declares the few FSEvents functions it calls, and where the SDK is present the compiler checks those declarations against its headers. `src/net/macos-sdk/` does the same for the two SystemConfiguration calls curl makes and the headers c-ares includes; the build searches it after the SDK.
 
 ## Building
 
@@ -143,7 +143,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/crypto/md5.h` | MD5, for checksums that protocols still name, such as S3's ETag |
 | | `mc/crypto/crc32.h` | CRC-32 (IEEE, as zlib's) and CRC-32C (Castagnoli) |
 | | `mc/crypto/sigv4.h` | AWS Signature Version 4 request signing, and the signing key it derives |
-| platform | `mc/platform/platform.h` | Clock, secure random bytes, locale-independent floats, threads, files and mappings, writes made durable with `F_FULLFSYNC` on macOS, reading a descriptor to its end, directories with metadata, advisory file locks, a search for a file up through parent directories, a private per-user runtime directory, processes (also detached into a session of their own), environment, signals and a thread that watches for them, TCP and Unix sockets, non-blocking accepts, sends and receives, and socket pairs for driving a server in-process |
+| platform | `mc/platform/platform.h` | Clock, secure random bytes, locale-independent floats, threads, files and mappings, writes made durable with `F_FULLFSYNC` on macOS, reading a descriptor to its end, directories with metadata, advisory file locks, a search for a file up through parent directories, a private per-user runtime directory, processes (also detached into a session of their own), environment, signals and a thread that watches for them, TCP, UDP and Unix sockets, non-blocking accepts, sends and receives, and socket pairs for driving a server in-process |
 | | `mc/platform/frame.h` | Length-prefixed frames of a header and a body on a stream socket |
 | | `mc/platform/poll.h` | An event loop's wait on many sockets, on kqueue and epoll, with a wake from other threads; the `net_try_*` calls move bytes without waiting |
 | | `mc/platform/watch.h` | Recursive file watching on FSEvents and inotify, in settled batches of paths |
@@ -176,6 +176,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/net/s3.h` | S3 and the stores that speak its API: objects in memory or files, multipart uploads, metadata, paged listing, retries with backoff, credentials found as the AWS tools find them; thread-safe, with pooled connections |
 | | `mc/net/sigv4_verify.h` | AWS Signature Version 4 checked as an S3-compatible server does: the Authorization header or a presigned query, clock skew and expiry, the payload hash mode, and bodies read with the aws-chunked framing taken off and each chunk, the trailer or the whole body checked |
 | | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |
+| | `mc/net/dns.h` | A, AAAA, MX, TXT and PTR records for checks on a mail's sender, on c-ares: the system's servers or given ones, replies matched by id, server and DNS 0x20 case, TCP for replies too long for UDP, answers cached for their TTL; lookups block and many threads may share a resolver |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
 | term | `mc/term/color.h` | RGB, three-stop gradients, the nearest of the 256 or 16 xterm colours, `#rrggbb` and xterm numbers |

@@ -288,6 +288,19 @@ bool net_accept(int listener, int timeout_ms, int *client);
 // address tried. Name resolution counts toward it but blocks in the system
 // resolver, which cannot be cut short.
 [[nodiscard]] Error net_connect(String host, String port, int timeout_ms, int *fd, Err *err);
+// net_listen_udp binds a datagram socket to host:port as net_listen binds a
+// stream socket; net_local_address names it the same way.
+[[nodiscard]] Error net_listen_udp(String address, int *fd, Err *err);
+// NetPeer is where a datagram came from, to send the answer back to.
+typedef struct NetPeer {
+    alignas(8) unsigned char address[128];
+    uint32_t len;
+} NetPeer;
+// net_receive_from waits up to timeout_ms for one datagram of at most
+// capacity bytes, the rest of a longer one dropped. None is ERR_TIMEOUT.
+[[nodiscard]] Error net_receive_from(int fd, int timeout_ms, void *buffer, size_t capacity, size_t *got, NetPeer *peer,
+                                     Err *err);
+[[nodiscard]] Error net_send_to(int fd, String data, const NetPeer *peer, Err *err);
 // net_set_timeouts bounds each later send and receive on fd.
 [[nodiscard]] Error net_set_timeouts(int fd, int timeout_ms, Err *err);
 void net_close(int fd);
