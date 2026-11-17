@@ -178,6 +178,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |
 | | `mc/net/dns.h` | A, AAAA, MX, TXT and PTR records for checks on a mail's sender, on c-ares: the system's servers or given ones, replies matched by id, server and DNS 0x20 case, TCP for replies too long for UDP, answers cached for their TTL; lookups block and many threads may share a resolver |
 | | `mc/net/ip.h` | IPv4 and IPv6 addresses read strictly, written as RFC 5952 recommends, and matched against networks by prefix, as SPF's ip4 and ip6 mechanisms match |
+| | `mc/net/signature.h` | RSASSA-PKCS1-v1_5 signatures of SHA-256 digests checked as DKIM checks them, on mbedTLS's PSA crypto: keys as a SubjectPublicKeyInfo or a bare PKCS #1 RSAPublicKey, and their size for refusing short ones |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
 | term | `mc/term/color.h` | RGB, three-stop gradients, the nearest of the 256 or 16 xterm colours, `#rrggbb` and xterm numbers |
