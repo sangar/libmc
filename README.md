@@ -177,6 +177,7 @@ Headers live in `include/mc/<area>/` and their sources in `src/<area>/`.
 | | `mc/net/sigv4_verify.h` | AWS Signature Version 4 checked as an S3-compatible server does: the Authorization header or a presigned query, clock skew and expiry, the payload hash mode, and bodies read with the aws-chunked framing taken off and each chunk, the trailer or the whole body checked |
 | | `mc/net/ftp.h` | Upload, download and list files over FTPS, streaming to and from local files |
 | | `mc/net/dns.h` | A, AAAA, MX, TXT and PTR records for checks on a mail's sender, on c-ares: the system's servers or given ones, replies matched by id, server and DNS 0x20 case, TCP for replies too long for UDP, answers cached for their TTL; lookups block and many threads may share a resolver |
+| | `mc/net/ip.h` | IPv4 and IPv6 addresses read strictly, written as RFC 5952 recommends, and matched against networks by prefix, as SPF's ip4 and ip6 mechanisms match |
 | log | `mc/log/log.h` | Structured logging like Go's slog, as text or JSON lines |
 | | `mc/log/logfile.h` | Lines appended to a file after their time, rotated at a size limit |
 | term | `mc/term/color.h` | RGB, three-stop gradients, the nearest of the 256 or 16 xterm colours, `#rrggbb` and xterm numbers |
