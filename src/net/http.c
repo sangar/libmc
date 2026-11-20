@@ -81,16 +81,20 @@ bool http_response_header(const HttpResponse *response, String name, String *val
 }
 
 // Hop collects one response: the body and headers curl hands over, in the
-// caller's arena, or a 2xx body in the download file.
+// caller's arena, or routes the 2xx body into a download file or sink.
 typedef struct Hop {
     CURL *curl;
     Arena *arena;
     StringBuilder body;
     size_t max_body;
+    size_t body_bytes;
     bool too_large;
     const HttpDownload *download;
     int64_t downloaded;
     bool write_failed;
+    const HttpBodySink *sink;
+    Error sink_failure;
+    Err sink_detail;
     HttpHeader *headers;
     size_t header_count;
     size_t header_capacity;
@@ -110,11 +114,24 @@ static size_t receive_body(char *data, size_t size, size_t count, void *argument
         hop->downloaded += (int64_t)length;
         return length;
     }
-    if (hop->body.len + length > hop->max_body) {
+    if (length > hop->max_body - hop->body_bytes) {
         hop->too_large = true;
         return 0;
     }
-    str_builder_append(&hop->body, (String){ data, length });
+    hop->body_bytes += length;
+    String chunk = { data, length };
+    if (hop->sink != nullptr && status >= 200 && status < 300) {
+        if (length > 0) {
+            hop->sink_detail = (Err){0};
+            hop->sink_failure = hop->sink->receive(hop->sink->context, (int)status, hop->headers,
+                                                  hop->header_count, chunk, &hop->sink_detail);
+            if (hop->sink_failure != ERR_OK) {
+                return 0;
+            }
+        }
+    } else {
+        str_builder_append(&hop->body, chunk);
+    }
     return length;
 }
 
@@ -229,6 +246,12 @@ static bool is_method(String method)
 [[nodiscard]] static Error map_curl_error(CURLcode code, const Hop *hop, const BodySource *source, Cancel *cancel,
                                          const char *detail, Err *err)
 {
+    if (hop->sink_failure != ERR_OK) {
+        if (err != nullptr) {
+            *err = hop->sink_detail;
+        }
+        return hop->sink_failure;
+    }
     if (hop->write_failed) {
         return err_set(err, ERR_IO, "http: cannot write the download");
     }
@@ -391,6 +414,9 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
     if (request->body_file != nullptr && (request->body_file->offset < 0 || request->body_file->length < 0)) {
         return err_set(err, ERR_INVALID_ARGUMENT, "http: body_file has a negative offset or length");
     }
+    if (request->sink != nullptr && (request->sink->receive == nullptr || request->download != nullptr)) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "http: a body sink needs a callback and cannot be used with download");
+    }
     Arena *scratch = arena_create(0);
     HopRequest hop_request = {
         .method = str_cstr(scratch, method),
@@ -420,6 +446,7 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
             .body = str_builder_create(arena, INITIAL_BODY_CAPACITY),
             .max_body = client->config.max_response_bytes,
             .download = request->download,
+            .sink = request->sink,
         };
         BodySource source = { .file = hop_request.body_file };
         char error_buffer[CURL_ERROR_SIZE] = "";
@@ -433,7 +460,7 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
         char *location = nullptr;
         curl_easy_getinfo(client->curl, CURLINFO_RESPONSE_CODE, &status);
         curl_easy_getinfo(client->curl, CURLINFO_REDIRECT_URL, &location);
-        if (location != nullptr && follows(status, &hop_request)) {
+        if (!request->no_redirects && location != nullptr && follows(status, &hop_request)) {
             if (hops == client->config.max_redirects) {
                 e = err_set(err, ERR_NETWORK, "http: more than %zu redirects from %.*s",
                             client->config.max_redirects, (int)request->url.len, request->url.data);

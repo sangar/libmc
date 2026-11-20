@@ -695,6 +695,81 @@ static void http_sends_requests_and_reads_responses(Test *test)
     server_stop(&server);
 }
 
+typedef struct TestHttpSink {
+    StringBuilder body;
+    size_t calls;
+    int status;
+    bool chunked;
+    bool cancel;
+} TestHttpSink;
+
+[[nodiscard]] static Error test_http_sink_receive(void *context, int status, const HttpHeader *headers,
+                                                   size_t header_count, String chunk, Err *err)
+{
+    TestHttpSink *sink = context;
+    sink->calls++;
+    sink->status = status;
+    String encoding = {0};
+    sink->chunked = http_header_find(headers, header_count, S("Transfer-Encoding"), &encoding) &&
+                    str_equal(encoding, S("chunked"));
+    if (sink->cancel) {
+        return err_set(err, ERR_CANCELLED, "stop receiving");
+    }
+    str_builder_append(&sink->body, chunk);
+    return ERR_OK;
+}
+
+static void http_streams_successful_bodies_to_a_sink(Test *test)
+{
+    Server server;
+    if (!server_start(test, &server, nullptr)) {
+        test_check(test, false, "starts the server");
+        return;
+    }
+    HttpClient *client = local_client(test, 1024, 0);
+    Err err = {0};
+    HttpResponse response = {0};
+    TestHttpSink sink = { .body = str_builder_create(test->arena, 32) };
+    HttpBodySink target = { .receive = test_http_sink_receive, .context = &sink };
+    String base = str_concat(test->arena, S("http://"), server.address);
+    HttpRequest request = { .url = str_concat(test->arena, base, S("/chunked")), .sink = &target };
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK, err.msg);
+    test_check(test, sink.calls > 0 && sink.status == 200 && sink.chunked && response.status == 200 && !response.body.len,
+               "the sink sees status and headers and replaces body buffering");
+    test_check_str(test, str_builder_finish(&sink.body), S("hello world"), "streams a decoded chunked body");
+    sink.cancel = true;
+    sink.calls = 0;
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_CANCELLED &&
+                         sink.calls == 1 && str_equal(S(err.msg), S("stop receiving")),
+               "stops immediately and returns the sink error");
+    sink.cancel = false;
+    sink.calls = 0;
+    sink.body.len = 0;
+    request.url = str_concat(test->arena, base, S("/large-chunked"));
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_UNSUPPORTED && sink.body.len <= 1024,
+               "the decoded body budget also applies to the sink");
+    sink.calls = 0;
+    request.url = str_concat(test->arena, base, S("/unavailable"));
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK &&
+                         response.status == 503 && str_equal(response.body, S("try later")) && !sink.calls,
+               "a non-2xx body is buffered, not sent to the sink");
+    request.url = str_concat(test->arena, base, S("/found"));
+    request.no_redirects = true;
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK &&
+                         response.status == 302 && !sink.calls,
+               "a request can disable redirects");
+    const HttpDownload download = { .fd = -1 };
+    request.download = &download;
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_INVALID_ARGUMENT,
+               "sink and download cannot be combined");
+    request.download = nullptr;
+    target.receive = nullptr;
+    test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_INVALID_ARGUMENT,
+               "a sink requires a callback");
+    http_client_destroy(client);
+    server_stop(&server);
+}
+
 static void http_follows_redirects_within_the_rules(Test *test)
 {
     Server server;
@@ -1326,6 +1401,7 @@ static void ftp_rejects_bad_arguments(Test *test)
 
 const TestCase HTTP_TESTS[] = {
     { "http_sends_requests_and_reads_responses", http_sends_requests_and_reads_responses },
+    { "http_streams_successful_bodies_to_a_sink", http_streams_successful_bodies_to_a_sink },
     { "http_follows_redirects_within_the_rules", http_follows_redirects_within_the_rules },
     { "http_enforces_limits", http_enforces_limits },
     { "http_verifies_tls_certificates", http_verifies_tls_certificates },
