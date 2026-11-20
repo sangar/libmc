@@ -81,16 +81,20 @@ bool http_response_header(const HttpResponse *response, String name, String *val
 }
 
 // Hop collects one response: the body and headers curl hands over, in the
-// caller's arena, or a 2xx body in the download file.
+// caller's arena, or routes the 2xx body into a download file or sink.
 typedef struct Hop {
     CURL *curl;
     Arena *arena;
     StringBuilder body;
     size_t max_body;
+    size_t body_bytes;
     bool too_large;
     const HttpDownload *download;
     int64_t downloaded;
     bool write_failed;
+    const HttpBodySink *sink;
+    Error sink_failure;
+    Err sink_detail;
     HttpHeader *headers;
     size_t header_count;
     size_t header_capacity;
@@ -110,11 +114,24 @@ static size_t receive_body(char *data, size_t size, size_t count, void *argument
         hop->downloaded += (int64_t)length;
         return length;
     }
-    if (hop->body.len + length > hop->max_body) {
+    if (length > hop->max_body - hop->body_bytes) {
         hop->too_large = true;
         return 0;
     }
-    str_builder_append(&hop->body, (String){ data, length });
+    hop->body_bytes += length;
+    String chunk = { data, length };
+    if (hop->sink != nullptr && status >= 200 && status < 300) {
+        if (length > 0) {
+            hop->sink_detail = (Err){0};
+            hop->sink_failure = hop->sink->receive(hop->sink->context, (int)status, hop->headers,
+                                                  hop->header_count, chunk, &hop->sink_detail);
+            if (hop->sink_failure != ERR_OK) {
+                return 0;
+            }
+        }
+    } else {
+        str_builder_append(&hop->body, chunk);
+    }
     return length;
 }
 
@@ -229,6 +246,12 @@ static bool is_method(String method)
 [[nodiscard]] static Error map_curl_error(CURLcode code, const Hop *hop, const BodySource *source, Cancel *cancel,
                                          const char *detail, Err *err)
 {
+    if (hop->sink_failure != ERR_OK) {
+        if (err != nullptr) {
+            *err = hop->sink_detail;
+        }
+        return hop->sink_failure;
+    }
     if (hop->write_failed) {
         return err_set(err, ERR_IO, "http: cannot write the download");
     }
@@ -253,6 +276,22 @@ static bool is_method(String method)
         return err_set(err, ERR_OUT_OF_MEMORY, "http: %s", message);
     default:
         return err_set(err, ERR_NETWORK, "http: %s", message);
+    }
+}
+
+static bool retryable_transport_error(CURLcode code)
+{
+    switch (code) {
+    case CURLE_COULDNT_CONNECT:
+    case CURLE_SEND_ERROR:
+    case CURLE_RECV_ERROR:
+    case CURLE_GOT_NOTHING:
+    case CURLE_PARTIAL_FILE:
+    case CURLE_HTTP2:
+    case CURLE_HTTP2_STREAM:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -383,6 +422,7 @@ static bool follows(long status, HopRequest *hop_request)
 
 Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, HttpResponse *response, Err *err)
 {
+    *response = (HttpResponse){0};
     String method = request->method.len > 0 ? request->method : S("GET");
     if (!is_method(method)) {
         return err_set(err, ERR_INVALID_ARGUMENT, "http: unsupported method %.*s", (int)min_size(method.len, 16),
@@ -390,6 +430,9 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
     }
     if (request->body_file != nullptr && (request->body_file->offset < 0 || request->body_file->length < 0)) {
         return err_set(err, ERR_INVALID_ARGUMENT, "http: body_file has a negative offset or length");
+    }
+    if (request->sink != nullptr && (request->sink->receive == nullptr || request->download != nullptr)) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "http: a body sink needs a callback and cannot be used with download");
     }
     Arena *scratch = arena_create(0);
     HopRequest hop_request = {
@@ -420,20 +463,24 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
             .body = str_builder_create(arena, INITIAL_BODY_CAPACITY),
             .max_body = client->config.max_response_bytes,
             .download = request->download,
+            .sink = request->sink,
         };
         BodySource source = { .file = hop_request.body_file };
         char error_buffer[CURL_ERROR_SIZE] = "";
         set_options(client, &hop_request, headers, &hop, &source, error_buffer);
         CURLcode code = curl_easy_perform(client->curl);
+        long status = 0;
+        curl_easy_getinfo(client->curl, CURLINFO_RESPONSE_CODE, &status);
+        response->status = (int)status;
         if (code != CURLE_OK) {
             e = map_curl_error(code, &hop, &source, request->cancel, error_buffer, err);
+            response->retryable_transport = e == ERR_NETWORK && hop.sink_failure == ERR_OK &&
+                                            retryable_transport_error(code);
             break;
         }
-        long status = 0;
         char *location = nullptr;
-        curl_easy_getinfo(client->curl, CURLINFO_RESPONSE_CODE, &status);
         curl_easy_getinfo(client->curl, CURLINFO_REDIRECT_URL, &location);
-        if (location != nullptr && follows(status, &hop_request)) {
+        if (!request->no_redirects && location != nullptr && follows(status, &hop_request)) {
             if (hops == client->config.max_redirects) {
                 e = err_set(err, ERR_NETWORK, "http: more than %zu redirects from %.*s",
                             client->config.max_redirects, (int)request->url.len, request->url.data);
@@ -441,7 +488,21 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
             }
             // location belongs to the handle and changes on the next perform.
             hop_request.url = str_cstr(scratch, S(location));
+            response->status = 0;
             continue;
+        }
+        int64_t retry_after = 0;
+        String value = {0};
+        if (http_header_find(hop.headers, hop.header_count, S("Retry-After"), &value)) {
+            if (str_is_digits(value)) {
+                uint64_t seconds = 0;
+                retry_after = str_parse_u64(value, &seconds) && seconds <= INT64_MAX ? (int64_t)seconds : INT64_MAX;
+            } else {
+                // Header values are NUL-terminated by receive_header.
+                int64_t date = (int64_t)curl_getdate(value.data, nullptr);
+                int64_t now = clock_wall_ns() / NS_PER_SECOND;
+                retry_after = date != -1 && date > now ? date - now : 0;
+            }
         }
         *response = (HttpResponse){
             .status = (int)status,
@@ -450,6 +511,7 @@ Error http_send(HttpClient *client, Arena *arena, const HttpRequest *request, Ht
             .body = str_builder_finish(&hop.body),
             .url = str_copy(arena, S(hop_request.url)),
             .downloaded = hop.downloaded,
+            .retry_after_seconds = retry_after,
         };
         break;
     }

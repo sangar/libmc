@@ -66,6 +66,16 @@ typedef struct HttpDownload {
     int fd;
 } HttpDownload;
 
+// HttpBodySink consumes nonempty body chunks of a 2xx response instead of
+// buffering them. Content decoding follows the same rules as response.body.
+// The bytes and headers are borrowed during the callback, which runs on the
+// http_send thread and must not reenter that client. Returning a non-OK Error
+// stops the transfer and returns that Error and detail to the caller.
+typedef struct HttpBodySink {
+    Error (*receive)(void *context, int status, const HttpHeader *headers, size_t header_count, String chunk, Err *err);
+    void *context;
+} HttpBodySink;
+
 typedef struct HttpRequest {
     // method is GET, HEAD, POST, PUT, PATCH or DELETE; empty is GET.
     String method;
@@ -86,6 +96,11 @@ typedef struct HttpRequest {
     // positive; negative leaves the request without one, for bodies too large
     // to bound, where stall_timeout_ms is the safeguard.
     int64_t timeout_ms;
+    // sink and download are mutually exclusive. max_response_bytes also
+    // bounds bytes delivered to a sink. Non-2xx bodies are still buffered.
+    const HttpBodySink *sink;
+    // no_redirects returns the first response, even if it has Location.
+    bool no_redirects;
 } HttpRequest;
 
 // HttpResponse is the final response, after any redirects, in the arena
@@ -99,6 +114,14 @@ typedef struct HttpResponse {
     String url;
     // downloaded is how many bytes went to the request's download file.
     int64_t downloaded;
+    // retry_after_seconds is the Retry-After delay on a completed response,
+    // or zero when absent, invalid, due now or in the past. Numeric delays
+    // larger than INT64_MAX saturate.
+    int64_t retry_after_seconds;
+    // True on selected transient transport failures, such as a dropped
+    // connection. Not set for timeouts, DNS/TLS errors or sink failures.
+    // The caller still decides whether replaying the request is safe.
+    bool retryable_transport;
 } HttpResponse;
 
 // HttpClient keeps connections open between requests. One thread uses it at
@@ -114,11 +137,15 @@ String http_default_ca_file(void);
 void http_client_destroy(HttpClient *client);
 
 // http_send performs request and fills response in arena. Any status is an
-// answer, so a 404 or 503 is ERR_OK with that status. A malformed URL, an
+// answer, so a 404 or 503 is ERR_OK with that status. On failure the response
+// is empty except for the HTTP status, if observed for the failed hop, and
+// retryable_transport. A malformed URL, an
 // unsupported method or scheme, or a host that is not allowed, also on a
 // redirect, is ERR_INVALID_ARGUMENT; a timeout ERR_TIMEOUT; a body over
-// max_response_bytes ERR_UNSUPPORTED; cancellation ERR_CANCELLED; failing to
-// read body_file or write the download ERR_IO, after which the download file
+// max_response_bytes ERR_UNSUPPORTED; cancellation ERR_CANCELLED; a sink
+// error is returned unchanged, and the sink may have seen part of the body
+// even if the request fails. On success the sink leaves response.body empty.
+// Failing to read body_file or write the download is ERR_IO, after which the download file
 // may hold part of the body; anything else that prevents an answer, such as
 // DNS, connection or certificate failures and too many redirects,
 // ERR_NETWORK. 301, 302 and 303 redirects continue as GET without the body;
