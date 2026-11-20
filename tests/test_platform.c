@@ -1,5 +1,6 @@
 #include "test.h"
 
+#include "mc/concurrency/cancel.h"
 #include "mc/text/path.h"
 #include "mc/platform/frame.h"
 #include "mc/platform/platform.h"
@@ -291,6 +292,56 @@ static void processes_time_out_with_their_children(Test *test)
     test_check(test, process_run_timeout(a, strlist_of(a, countof(slow), slow), S(""), 200, &result, &err) == ERR_TIMEOUT,
                "a child that runs too long is ERR_TIMEOUT");
     test_check(test, clock_monotonic_ns() - started < 5000000000, "the timeout ends the wait");
+}
+
+static void process_collect_output(void *context, String bytes)
+{
+    str_builder_append(context, bytes);
+}
+
+static void process_cancel_on_output(void *context, String bytes)
+{
+    unused(bytes);
+    cancel_request(context);
+}
+
+static void processes_stream_with_deadline_and_cancellation(Test *test)
+{
+    Arena *a = test->arena;
+    Arena *scratch = arena_create(0);
+    Err err = {0};
+    ProcessResult result;
+    StringBuilder output = str_builder_create(a, 64);
+    const char *const ordered[] = {"sh", "-c", "cat; printf first; printf second >&2; exit 3"};
+    test_check(test, process_run_stream(scratch, strlist_of(a, countof(ordered), ordered), 5000, nullptr,
+                                       process_collect_output, &output, &result, &err) == ERR_OK,
+               "process output can stream into a caller-provided sink");
+    test_check_str(test, str_builder_finish(&output), S("firstsecond"), "merged stdout and stderr keep pipe order");
+    test_check(test, result.exit_code == 3 && !result.stdout_text.len && !result.stderr_text.len,
+               "streaming reports exit status without buffering");
+
+    const char *const closed[] = {"sh", "-c", "echo before; exec 1>&- 2>&-; sleep 20"};
+    output = str_builder_create(a, 64);
+    int64_t started = clock_monotonic_ns();
+    test_check(test, process_run_stream(scratch, strlist_of(a, countof(closed), closed), 300, nullptr,
+                                       process_collect_output, &output, &result, &err) == ERR_TIMEOUT,
+               "deadline still applies after the pipes close");
+    test_check_str(test, str_builder_finish(&output), S("before\n"), "bytes already delivered survive timeout");
+    test_check(test, clock_monotonic_ns() - started < 3LL * NS_PER_SECOND, "timeout bounds the wait after EOF");
+
+    Cancel cancel;
+    cancel_init(&cancel);
+    const char *const quiet[] = {"sh", "-c", "echo started; exec sleep 20"};
+    started = clock_monotonic_ns();
+    test_check(test, process_run_stream(scratch, strlist_of(a, countof(quiet), quiet), 5000, &cancel,
+                                       process_cancel_on_output, &cancel, &result, &err) == ERR_CANCELLED,
+               "cancellation stops a running child with no more output");
+    test_check(test, clock_monotonic_ns() - started < 3LL * NS_PER_SECOND, "the run does not wait for its timeout");
+    test_check(test, process_run_stream(scratch, strlist_of(a, countof(quiet), quiet), -1, &cancel, nullptr, nullptr,
+                                       &result, &err) == ERR_CANCELLED && arena_bytes_used(scratch) == 0,
+               "pre-cancellation prevents launch and streaming restores scratch");
+    cancel_destroy(&cancel);
+    arena_destroy(scratch);
 }
 
 static void environment_reads_and_writes(Test *test)
@@ -1025,6 +1076,7 @@ const TestCase PLATFORM_TESTS[] = {
     { "processes_capture_output_and_status", processes_capture_output_and_status },
     { "processes_stream_more_than_a_pipe_holds", processes_stream_more_than_a_pipe_holds },
     { "processes_time_out_with_their_children", processes_time_out_with_their_children },
+    { "processes_stream_with_deadline_and_cancellation", processes_stream_with_deadline_and_cancellation },
     { "environment_reads_and_writes", environment_reads_and_writes },
     { "processes_take_signals_and_limits", processes_take_signals_and_limits },
     { "threads_share_state_under_a_mutex", threads_share_state_under_a_mutex },
