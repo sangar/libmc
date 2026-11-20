@@ -17,8 +17,6 @@
 #include "mc/platform/platform.h"
 #include "posix_shared.h"
 
-extern char **environ;
-
 enum { SLAVE_NAME_LIMIT = 256 };
 
 static struct winsize window_size(PtySize size)
@@ -36,50 +34,6 @@ static struct winsize window_size(PtySize size)
 #else
     return ptsname_r(master, name, SLAVE_NAME_LIMIT) == 0;
 #endif
-}
-
-static size_t find_variable(char **items, size_t count, String name)
-{
-    for (size_t i = 0; i < count; i++) {
-        if (strncmp(items[i], name.data, name.len) == 0 && items[i][name.len] == '=') {
-            return i;
-        }
-    }
-    return count;
-}
-
-// build_environment is this process's environment with overrides applied in
-// turn: NAME=value replaces the entry of that name or joins the end, and a
-// bare NAME removes it.
-static char **build_environment(Arena *scratch, StringList overrides)
-{
-    size_t inherited = 0;
-    while (environ[inherited] != nullptr) {
-        inherited++;
-    }
-    size_t capacity = arena_size_add(arena_size_add(inherited, overrides.count), 1);
-    char **items = arena_push(scratch, arena_size_mul(capacity, sizeof *items));
-    size_t count = 0;
-    for (size_t i = 0; i < inherited; i++) {
-        items[count++] = environ[i];
-    }
-    for (size_t i = 0; i < overrides.count; i++) {
-        String name;
-        String value;
-        bool assigns = str_cut(overrides.items[i], '=', &name, &value);
-        size_t at = find_variable(items, count, name);
-        if (!assigns) {
-            if (at < count) {
-                memmove(&items[at], &items[at + 1], (count - at - 1) * sizeof *items);
-                count--;
-            }
-            continue;
-        }
-        items[at] = (char *)str_cstr(scratch, overrides.items[i]);
-        count = at == count ? count + 1 : count;
-    }
-    items[count] = nullptr;
-    return items;
 }
 
 // child_path is the PATH the child will have: the last override of it, else this process's.
@@ -185,7 +139,7 @@ Error pty_spawn(Arena *scratch, StringList argv, String cwd, StringList env, Pty
     const char *program_path = str_cstr(scratch, program);
     const char *cwd_path = str_cstr(scratch, cwd);
     char **child_argv = build_argv(scratch, argv, program_path);
-    char **child_env = build_environment(scratch, env);
+    char **child_env = posix_build_environment(scratch, env);
 
     // Every descriptor is close-on-exec from the start, so a child that another
     // thread spawns meanwhile does not keep this terminal open.

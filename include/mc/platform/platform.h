@@ -211,6 +211,29 @@ typedef struct ProcessResult {
 // terminal's interrupt, so a negative timeout_ms runs it as process_run does.
 [[nodiscard]] Error process_run_timeout(Arena *arena, StringList argv, String stdin_text, int64_t timeout_ms,
                                         ProcessResult *result, Err *err);
+struct Cancel;
+typedef void (*ProcessOutputSink)(void *context, String bytes);
+
+typedef struct ProcessStreamOptions {
+    int64_t timeout_ms; // Negative disables the deadline.
+    struct Cancel *cancel; // Optional; borrowed until the call returns.
+    StringList env; // NAME=value replaces/adds a variable; bare NAME removes it.
+    ProcessOutputSink sink; // Null discards output.
+    void *context;
+} ProcessStreamOptions;
+
+// process_run_stream runs argv in a new session without a controlling
+// terminal and with stdin at EOF. As in process_run, argv[0] is looked up
+// on the parent's PATH. Merged stdout/stderr arrives in nonempty, borrowed
+// chunks on the calling thread; the caller must not block in the sink.
+// After the child exits, we drain briefly but do not wait for descendants
+// holding the pipe. They are not killed on success; if they keep writing to
+// the pipe, they may see SIGPIPE. On cancellation or timeout before the
+// child's exit is observed, its group is killed and the child reaped.
+// Previously delivered output remains with the caller. On success result
+// reports exit status but no buffered output. Scratch is restored.
+[[nodiscard]] Error process_run_stream(Arena *scratch, StringList argv, ProcessStreamOptions options,
+                                       ProcessResult *result, Err *err);
 // process_run_interactive runs argv on this process's terminal; *exit_code is 128 plus the signal when one ended it.
 [[nodiscard]] Error process_run_interactive(Arena *scratch, StringList argv, int *exit_code, Err *err);
 bool process_look_path(Arena *arena, String name, String *path);

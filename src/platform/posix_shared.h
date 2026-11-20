@@ -10,5 +10,8 @@
 // posix_open_pipe keeps both ends out of every child; spawning dup2s the child's end to a standard stream.
 bool posix_open_pipe(int fds[2]);
 bool posix_make_nonblocking(int fd);
+// Make a child environment without mutating the parent. Inherited entries
+// are borrowed; the returned vector and new entries live in scratch.
+char **posix_build_environment(Arena *scratch, StringList overrides);
 // posix_look_path finds name in the directories of path_list, a value of PATH.
 bool posix_look_path(Arena *arena, String name, String path_list, String *path);
