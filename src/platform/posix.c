@@ -1238,11 +1238,14 @@ static bool would_block(void)
     return errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK;
 }
 
+enum { PROCESS_POLL_MS = 20, PROCESS_DRAIN_MS = 50 };
+
 typedef struct {
     Cancel *cancel;
     int64_t deadline_ns;
     ProcessOutputSink sink;
     void *context;
+    pid_t leader; // Nonzero for streams that stop draining after this child exits.
 } ProcessPump;
 
 [[nodiscard]] static Error process_poll_wait(ProcessPump pump, int *wait_ms, Err *err)
@@ -1250,7 +1253,7 @@ typedef struct {
     if (pump.cancel && cancel_requested(pump.cancel)) {
         return err_set(err, ERR_CANCELLED, "process cancelled");
     }
-    *wait_ms = pump.cancel ? 20 : -1;
+    *wait_ms = pump.cancel || pump.leader ? PROCESS_POLL_MS : -1;
     if (pump.deadline_ns >= 0) {
         int64_t left = pump.deadline_ns - clock_monotonic_ns();
         if (left <= 0) {
@@ -1264,12 +1267,30 @@ typedef struct {
     return ERR_OK;
 }
 
+// Leave the child waitable until pumping finishes. The unreaped PID reserves
+// the group ID in case this run still has to signal the group.
+[[nodiscard]] static Error process_has_exited(pid_t pid, bool *exited, Err *err)
+{
+    siginfo_t info = {0};
+    while (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) < 0) {
+        if (errno != EINTR) {
+            // If the caller configured automatic reaping, the PID no longer
+            // reserves the group ID. Do not signal that ID on the error path.
+            *exited = errno == ECHILD;
+            return posix_fail_errno(err, "check process status");
+        }
+    }
+    *exited = info.si_pid == pid;
+    return ERR_OK;
+}
+
 // The descriptors are nonblocking, so a full pipe in one direction never stops the others.
 // A null capture discards those bytes unless an output sink is set.
 [[nodiscard]] static Error pump(Arena *arena, int stdin_fd, String stdin_text, int stdout_fd, int stderr_fd,
-                                ProcessPump options, Capture *out, Capture *errors, Err *err)
+                                ProcessPump options, Capture *out, Capture *errors, bool *leader_done, Err *err)
 {
     size_t written = 0;
+    int64_t drain_until = 0;
     if (stdin_text.len == 0) {
         close_if_open(&stdin_fd);
     }
@@ -1285,11 +1306,32 @@ typedef struct {
         if (stderr_fd >= 0) {
             fds[count++] = (struct pollfd){ .fd = stderr_fd, .events = POLLIN };
         }
+        if (options.leader && !drain_until) {
+            bool exited = false;
+            Error ready = process_has_exited(options.leader, &exited, err);
+            *leader_done = exited;
+            if (ready != ERR_OK) {
+                close_pipes(&stdin_fd, &stdout_fd, &stderr_fd);
+                return ready;
+            }
+            if (exited) {
+                drain_until = clock_monotonic_ns() + PROCESS_DRAIN_MS * NS_PER_MILLISECOND;
+            }
+        }
         int wait_ms = 0;
-        Error ready = process_poll_wait(options, &wait_ms, err);
-        if (ready != ERR_OK) {
-            close_pipes(&stdin_fd, &stdout_fd, &stderr_fd);
-            return ready;
+        if (drain_until) {
+            int64_t remaining = drain_until - clock_monotonic_ns();
+            if (remaining <= 0) {
+                close_pipes(&stdin_fd, &stdout_fd, &stderr_fd);
+                return ERR_OK;
+            }
+            wait_ms = (int)(remaining / NS_PER_MILLISECOND + 1);
+        } else {
+            Error ready = process_poll_wait(options, &wait_ms, err);
+            if (ready != ERR_OK) {
+                close_pipes(&stdin_fd, &stdout_fd, &stderr_fd);
+                return ready;
+            }
         }
         if (poll(fds, count, wait_ms) < 0) {
             if (errno == EINTR) {
@@ -1383,7 +1425,7 @@ static void record_status(int status, int *exit_code, int *signal_number)
         if (waited < 0 && errno != EINTR) {
             return posix_fail_errno(err, "wait for process %d", (int)pid);
         }
-        clock_sleep_ms(wait_ms > 20 ? 20 : wait_ms);
+        clock_sleep_ms(wait_ms > PROCESS_POLL_MS ? PROCESS_POLL_MS : wait_ms);
     }
 }
 
@@ -1444,7 +1486,7 @@ static bool disable_sigpipe(int fd)
 // own SIGPIPE handling.
 [[nodiscard]] static Error pump_without_sigpipe(Arena *arena, int stdin_fd, String stdin_text, int stdout_fd,
                                                 int stderr_fd, ProcessPump options, Capture *out, Capture *errors,
-                                                Err *err)
+                                                bool *leader_done, Err *err)
 {
     sigset_t sigpipe_only;
     sigemptyset(&sigpipe_only);
@@ -1454,7 +1496,7 @@ static bool disable_sigpipe(int fd)
     sigset_t pending;
     sigpending(&pending);
     bool was_pending = sigismember(&pending, SIGPIPE);
-    Error e = pump(arena, stdin_fd, stdin_text, stdout_fd, stderr_fd, options, out, errors, err);
+    Error e = pump(arena, stdin_fd, stdin_text, stdout_fd, stderr_fd, options, out, errors, leader_done, err);
     sigpending(&pending);
     if (!was_pending && sigismember(&pending, SIGPIPE)) {
         int number;
@@ -1494,7 +1536,8 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
 }
 
 [[nodiscard]] static Error process_run_piped(Arena *arena, StringList argv, String stdin_text, int64_t timeout_ms,
-                                             ProcessPump options, bool stream, ProcessResult *result, Err *err)
+                                             ProcessPump options, bool stream, StringList env, ProcessResult *result,
+                                             Err *err)
 {
     *result = (ProcessResult){ .stdout_text = S(""), .stderr_text = S("") };
     if (options.cancel && cancel_requested(options.cancel)) {
@@ -1520,6 +1563,7 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
 
     bool grouped = stream || timeout_ms >= 0;
     char **items = build_argv(arena, argv);
+    char **child_env = env.count ? posix_build_environment(arena, env) : environ;
     pid_t pid;
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
@@ -1529,10 +1573,10 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
         if (rc == 0) {
             rc = redirect_child(&actions, in_pipe[0], out_pipe[1], stream ? out_pipe[1] : err_pipe[1]);
             if (rc == 0) {
-                rc = default_signals(&attributes, grouped ? POSIX_SPAWN_SETPGROUP : 0);
+                rc = default_signals(&attributes, stream ? POSIX_SPAWN_SETSID : grouped ? POSIX_SPAWN_SETPGROUP : 0);
             }
             if (rc == 0) {
-                rc = posix_spawnp(&pid, items[0], &actions, &attributes, items, environ);
+                rc = posix_spawnp(&pid, items[0], &actions, &attributes, items, child_env);
             }
             posix_spawnattr_destroy(&attributes);
         }
@@ -1550,24 +1594,26 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
 
     Capture out = {0};
     Capture errors = {0};
+    options.leader = stream ? pid : 0;
     options.deadline_ns = -1;
     if (timeout_ms >= 0) {
         int64_t now = clock_monotonic_ns();
         options.deadline_ns = timeout_ms > (INT64_MAX - now) / NS_PER_MILLISECOND ? INT64_MAX :
                               now + timeout_ms * NS_PER_MILLISECOND;
     }
+    bool leader_done = false;
     Error pumped = pump_without_sigpipe(arena, in_pipe[1], stdin_text, out_pipe[0], err_pipe[0], options,
-                                        stream ? nullptr : &out, stream ? nullptr : &errors, err);
+                                        stream ? nullptr : &out, stream ? nullptr : &errors, &leader_done, err);
     int status = 0;
     if (pumped != ERR_OK) {
-        if (grouped) {
+        if (grouped && !leader_done) {
             kill(-pid, SIGKILL);
         }
         Error ignored = wait_for(pid, &status, nullptr);
         unused(ignored);
         return pumped;
     }
-    Error waited = wait_for_controlled(pid, options, &status, err);
+    Error waited = leader_done ? wait_for(pid, &status, err) : wait_for_controlled(pid, options, &status, err);
     if (waited != ERR_OK) {
         if (waited == ERR_CANCELLED || waited == ERR_TIMEOUT) {
             kill(-pid, SIGKILL);
@@ -1585,15 +1631,14 @@ Error process_run(Arena *arena, StringList argv, String stdin_text, ProcessResul
 Error process_run_timeout(Arena *arena, StringList argv, String stdin_text, int64_t timeout_ms,
                           ProcessResult *result, Err *err)
 {
-    return process_run_piped(arena, argv, stdin_text, timeout_ms, (ProcessPump){0}, false, result, err);
+    return process_run_piped(arena, argv, stdin_text, timeout_ms, (ProcessPump){0}, false, (StringList){0}, result, err);
 }
 
-Error process_run_stream(Arena *scratch, StringList argv, int64_t timeout_ms, Cancel *cancel, ProcessOutputSink sink,
-                         void *context, ProcessResult *result, Err *err)
+Error process_run_stream(Arena *scratch, StringList argv, ProcessStreamOptions options, ProcessResult *result, Err *err)
 {
     ArenaMark mark = arena_mark(scratch);
-    ProcessPump options = {.cancel = cancel, .sink = sink, .context = context};
-    Error status = process_run_piped(scratch, argv, S(""), timeout_ms, options, true, result, err);
+    ProcessPump pump_options = {.cancel = options.cancel, .sink = options.sink, .context = options.context};
+    Error status = process_run_piped(scratch, argv, S(""), options.timeout_ms, pump_options, true, options.env, result, err);
     arena_release(mark);
     return status;
 }
@@ -1836,6 +1881,34 @@ Error process_raise_file_limit(Err *err)
 }
 
 // ---- environment ----
+
+char **posix_build_environment(Arena *scratch, StringList overrides)
+{
+    size_t count = 0;
+    while (environ[count]) {
+        count++;
+    }
+    size_t capacity = arena_size_add(arena_size_add(count, overrides.count), 1);
+    char **items = arena_push(scratch, arena_size_mul(capacity, sizeof *items));
+    memcpy(items, environ, count * sizeof *items);
+    for (size_t i = 0; i < overrides.count; i++) {
+        String name;
+        String value;
+        bool assigns = str_cut(overrides.items[i], '=', &name, &value);
+        size_t keep = 0;
+        for (size_t j = 0; j < count; j++) {
+            if (strncmp(items[j], name.data, name.len) != 0 || items[j][name.len] != '=') {
+                items[keep++] = items[j];
+            }
+        }
+        count = keep;
+        if (assigns) {
+            items[count++] = (char *)str_cstr(scratch, overrides.items[i]);
+        }
+    }
+    items[count] = nullptr;
+    return items;
+}
 
 StringList env_all(Arena *arena)
 {
