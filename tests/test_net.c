@@ -740,7 +740,8 @@ static void http_streams_successful_bodies_to_a_sink(Test *test)
     sink.cancel = true;
     sink.calls = 0;
     test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_CANCELLED &&
-                         sink.calls == 1 && str_equal(S(err.msg), S("stop receiving")),
+                         sink.calls == 1 && str_equal(S(err.msg), S("stop receiving")) &&
+                         response.status == 200 && !response.retryable_transport,
                "stops immediately and returns the sink error");
     sink.cancel = false;
     sink.calls = 0;
@@ -753,6 +754,8 @@ static void http_streams_successful_bodies_to_a_sink(Test *test)
     test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK &&
                          response.status == 503 && str_equal(response.body, S("try later")) && !sink.calls,
                "a non-2xx body is buffered, not sent to the sink");
+    test_check(test, response.retry_after_seconds == 120 && !response.retryable_transport,
+               "exposes the Retry-After delay separately from transport failures");
     request.url = str_concat(test->arena, base, S("/found"));
     request.no_redirects = true;
     test_check(test, http_send(client, test->arena, &request, &response, &err) == ERR_OK &&
@@ -856,8 +859,9 @@ static void http_verifies_tls_certificates(Test *test)
         .allowed_host_count = countof(LOCAL_HOSTS),
     };
     test_check(test, http_client_create(&untrusted, &client, &err) == ERR_OK, err.msg);
-    test_check(test, http_send(client, test->arena, &trusted, &response, &err) == ERR_NETWORK,
-               "refuses a server whose issuer is not trusted");
+    test_check(test, http_send(client, test->arena, &trusted, &response, &err) == ERR_NETWORK &&
+                         !response.retryable_transport && response.status == 0,
+               "refuses a server whose issuer is not trusted without suggesting retry");
     http_client_destroy(client);
     server_stop(&server);
     if (tls != nullptr) {

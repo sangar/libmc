@@ -114,6 +114,14 @@ typedef struct HttpResponse {
     String url;
     // downloaded is how many bytes went to the request's download file.
     int64_t downloaded;
+    // retry_after_seconds is the Retry-After delay on a completed response,
+    // or zero when absent, invalid, due now or in the past. Numeric delays
+    // larger than INT64_MAX saturate.
+    int64_t retry_after_seconds;
+    // True on selected transient transport failures, such as a dropped
+    // connection. Not set for timeouts, DNS/TLS errors or sink failures.
+    // The caller still decides whether replaying the request is safe.
+    bool retryable_transport;
 } HttpResponse;
 
 // HttpClient keeps connections open between requests. One thread uses it at
@@ -129,7 +137,9 @@ String http_default_ca_file(void);
 void http_client_destroy(HttpClient *client);
 
 // http_send performs request and fills response in arena. Any status is an
-// answer, so a 404 or 503 is ERR_OK with that status. A malformed URL, an
+// answer, so a 404 or 503 is ERR_OK with that status. On failure the response
+// is empty except for the HTTP status, if observed for the failed hop, and
+// retryable_transport. A malformed URL, an
 // unsupported method or scheme, or a host that is not allowed, also on a
 // redirect, is ERR_INVALID_ARGUMENT; a timeout ERR_TIMEOUT; a body over
 // max_response_bytes ERR_UNSUPPORTED; cancellation ERR_CANCELLED; a sink
