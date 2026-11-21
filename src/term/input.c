@@ -2,7 +2,7 @@
 
 #include "mc/text/utf8.h"
 
-enum { ESC = 0x1b, DEL = 0x7f, PARAM_LIMIT = 4 };
+enum { ESC = 0x1b, DEL = 0x7f, BEL = 0x07, PARAM_LIMIT = 4 };
 
 static const String PASTE_START = { "\x1b[200~", 6 };
 static const String PASTE_END = { "\x1b[201~", 6 };
@@ -105,6 +105,9 @@ static Key letter_key(char final)
 
 static Event csi_event(String body, char final, String raw)
 {
+    if (raw.data[1] == '[' && !body.len && (final == 'I' || final == 'O')) {
+        return plain(final == 'I' ? KEY_FOCUS_IN : KEY_FOCUS_OUT, raw);
+    }
     Params params = parse_params(body);
     if (params.private_marker && (final == 'M' || final == 'm')) {
         return mouse_event(params, final, raw);
@@ -131,6 +134,33 @@ static bool decode_paste(String bytes, bool complete, Event *event, size_t *used
     return true;
 }
 
+static bool starts_string(char second)
+{
+    return second == ']' || second == 'P' || second == 'X' || second == '^' || second == '_';
+}
+
+static bool is_digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+// decode_string decodes a terminal string, or returns false with *is_string
+// cleared when bytes are an alt key instead. Only an unended string that
+// opens with a digit, as replies do, waits or continues, so alt-P followed
+// by a key is never taken for one.
+static bool decode_string(String bytes, bool complete, Event *event, size_t *used, bool *is_string)
+{
+    bool ended = false;
+    size_t rest = input_string_rest(str_slice(bytes, 2, bytes.len), &ended);
+    *is_string = ended || (bytes.len > 2 ? is_digit(bytes.data[2]) : !complete);
+    if (!*is_string || (!ended && !complete)) {
+        return false;
+    }
+    *used = 2 + rest;
+    *event = plain(KEY_UNKNOWN, str_slice(bytes, 0, *used));
+    return true;
+}
+
 // decode_escape decodes what starts with ESC.
 static bool decode_escape(String bytes, bool complete, Event *event, size_t *used)
 {
@@ -142,6 +172,13 @@ static bool decode_escape(String bytes, bool complete, Event *event, size_t *use
     char second = bytes.data[1];
     if (str_starts_with(bytes, PASTE_START)) {
         return decode_paste(bytes, complete, event, used);
+    }
+    if (starts_string(second)) {
+        bool is_string = false;
+        bool decoded = decode_string(bytes, complete, event, used, &is_string);
+        if (is_string) {
+            return decoded;
+        }
     }
     if (second == '[' || second == 'O') {
         // ESC [ parameters final, or ESC O final for keypad keys.
@@ -169,6 +206,29 @@ static bool decode_escape(String bytes, bool complete, Event *event, size_t *use
     event->alt = true;
     event->raw = str_slice(bytes, 0, *used);
     return true;
+}
+
+bool input_string_continues(Event event)
+{
+    String raw = str_starts_with(event.raw, S("\x1b\x1b")) ? str_slice(event.raw, 1, event.raw.len) : event.raw;
+    return event.key == KEY_UNKNOWN && raw.len > 2 && raw.data[0] == ESC && starts_string(raw.data[1]) &&
+           !str_ends_with(raw, S("\a")) && !str_ends_with(raw, S("\x1b\\"));
+}
+
+size_t input_string_rest(String bytes, bool *ended)
+{
+    *ended = false;
+    for (size_t i = 0; i < bytes.len; i++) {
+        if (bytes.data[i] == BEL) {
+            *ended = true;
+            return i + 1;
+        }
+        if (bytes.data[i] == ESC && i + 1 < bytes.len && bytes.data[i + 1] == '\\') {
+            *ended = true;
+            return i + 2;
+        }
+    }
+    return bytes.len && bytes.data[bytes.len - 1] == ESC ? bytes.len - 1 : bytes.len;
 }
 
 String input_paste_text(String raw)

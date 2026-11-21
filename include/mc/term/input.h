@@ -21,6 +21,8 @@ typedef enum Key {
     KEY_DELETE,
     KEY_MOUSE,
     KEY_PASTE,
+    KEY_FOCUS_IN,
+    KEY_FOCUS_OUT,
     KEY_UNKNOWN,
 } Key;
 
@@ -55,6 +57,20 @@ bool input_decode(String bytes, bool complete, Event *event, size_t *used);
 // A paste longer than what is read at once arrives in parts: input_decode
 // makes the first part a KEY_PASTE without its end, and the bytes that follow
 // are more of it until its end marker.
+
+// A terminal string, such as a reply to an OSC query, is one KEY_UNKNOWN
+// event. Those are OSC, DCS, SOS, PM and APC, ended by BEL or ESC \. One
+// longer than what is read at once arrives in parts like a paste, so its
+// bytes are never taken for keys. Only one that opens with a digit, as
+// replies do, is waited for or continued; ESC P followed by a letter stays
+// alt-P and that letter.
+
+// input_string_continues reports whether a terminal string was cut short.
+bool input_string_continues(Event event);
+// input_string_rest takes what continues a terminal string: the bytes up to
+// and including its end, or all of bytes but an escape that could start the
+// end. It stores whether the string ended and returns the bytes taken.
+size_t input_string_rest(String bytes, bool *ended);
 
 // input_paste_text is the text of a KEY_PASTE without its markers.
 String input_paste_text(String raw);
