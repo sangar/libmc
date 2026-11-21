@@ -19,12 +19,14 @@ enum {
 };
 
 // Cell is one column of one row. A glyph of 0 is the right half of the wide
-// glyph to its left.
+// glyph to its left. link is 0, or what screen_link returned for the
+// hyperlink the cell is part of.
 typedef struct Cell {
     uint32_t glyph;
     Rgb fg;
     Rgb bg;
     uint8_t attrs;
+    uint16_t link;
 } Cell;
 
 typedef struct Rect {
@@ -85,6 +87,17 @@ int wrapped_rows(String text, int width);
 // wrapped_end stores the row and column just after the last glyph of text
 // wrapped at width, where a cursor at its end would be.
 void wrapped_end(String text, int width, int *row, int *column);
+
+// screen_link is the id that makes cells a hyperlink to uri, written as
+// OSC 8, for screen_mark_link. It is 0, no link, for an empty uri, one over
+// 2048 bytes or with a byte outside printable ASCII, and while the screen
+// holds 1024 links.
+// Ask for ids each frame: a render may forget the links no cell shows.
+uint16_t screen_link(Screen *screen, String uri);
+// screen_mark_link makes the cells in rect part of link, or of none for an
+// id the screen does not hold; drawing a glyph over a cell takes it out
+// again, so mark after drawing.
+void screen_mark_link(Screen *screen, Rect rect, uint16_t link);
 
 // screen_shade darkens every colour in rect, as under an overlay, the
 // terminal's own as their stand-ins.

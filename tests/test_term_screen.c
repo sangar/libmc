@@ -1,5 +1,7 @@
 #include "test.h"
 
+#include <stdio.h>
+
 #include "mc/term/draw.h"
 #include "mc/term/layout.h"
 #include "mc/term/progress.h"
@@ -201,6 +203,38 @@ static void screen_fades_toward_a_colour(Test *test)
     screen_destroy(screen);
 }
 
+static void screen_writes_hyperlinks(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_NONE);
+    screen_resize(screen, 3, 1);
+    screen_text(screen, 0, 0, 3, S("abc"), WHITE, 0);
+    uint16_t link = screen_link(screen, S("https://example.com/"));
+    test_check(test, link != 0 && screen_link(screen, S("https://example.com/")) == link, "one id per uri");
+    test_check(test, screen_link(screen, S("https://x/\x1b]")) == 0 &&
+                         screen_link(screen, S("https://x/\xc2\x9c\xc2\x9b" "2J")) == 0 && screen_link(screen, S("")) == 0,
+               "no link with control bytes, C1 ones in UTF-8 too, or without a uri");
+    screen_mark_link(screen, (Rect){ 0, 0, 1, 1 }, 999);
+    screen_mark_link(screen, (Rect){ 1, 0, 2, 1 }, link);
+    test_check_str(test, render_screen(test, screen),
+                   S("\x1b[1;1H\x1b[0ma\x1b]8;;https://example.com/\x1b\\bc\x1b]8;;\x1b\\"),
+                   "the link opens before its cells and closes after");
+    screen_text(screen, 0, 0, 3, S("abc"), WHITE, 0);
+    screen_mark_link(screen, (Rect){ 1, 0, 2, 1 }, link);
+    test_check(test, render_screen(test, screen).len == 0, "an unchanged link writes nothing");
+    screen_text(screen, 2, 0, 1, S("d"), WHITE, 0);
+    test_check_str(test, render_screen(test, screen), S("\x1b[1;3H\x1b[0md"), "drawing over a cell takes it out");
+
+    char uri[32];
+    for (int i = 0; i < 600; i++) {
+        snprintf(uri, sizeof uri, "https://example.com/%d", i);
+        screen_mark_link(screen, (Rect){ 0, 0, 1, 1 }, screen_link(screen, S(uri)));
+    }
+    render_screen(test, screen);
+    test_check(test, screen_link(screen, S(uri)) == 1 && screen_link(screen, S("https://example.com/0")) == 3,
+               "links no cell shows are forgotten");
+    screen_destroy(screen);
+}
+
 static void rects_hold_their_cells(Test *test)
 {
     Rect rect = { 2, 3, 4, 5 };
@@ -219,6 +253,7 @@ const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
     { "screen_keeps_the_terminal_colours", screen_keeps_the_terminal_colours },
     { "screen_fades_toward_a_colour", screen_fades_toward_a_colour },
+    { "screen_writes_hyperlinks", screen_writes_hyperlinks },
     { "rects_hold_their_cells", rects_hold_their_cells },
     { nullptr, nullptr },
 };
