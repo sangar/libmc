@@ -79,6 +79,35 @@ static void graphs_plot_in_braille(Test *test)
     screen_destroy(screen);
 }
 
+static String row_text(Test *test, Screen *screen, int y);
+
+static void panels_meters_and_sparklines_take_glyphs(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 4, 3);
+    draw_panel(screen, (Rect){ 0, 0, 4, 3 }, (Panel){ .border = WHITE, .glow = WHITE });
+    test_check_str(test, row_text(test, screen, 0), S("╭──╮"), "rounded by default");
+    Panel ascii = { .border = WHITE, .glow = WHITE, .glyphs = { '-', '|', '+', '+', '+', '+', '[', ']' } };
+    draw_panel(screen, (Rect){ 0, 0, 4, 3 }, ascii);
+    test_check_str(test, row_text(test, screen, 0), S("+--+"), "the top edge");
+    test_check_str(test, row_text(test, screen, 1), S("|  |"), "the sides");
+
+    draw_meter(screen, 0, 1, 4, 0.5f, gradient_of(WHITE, WHITE), BLACK, (MeterGlyphs){ 0 });
+    test_check_str(test, row_text(test, screen, 1), S("■■■■"), "squares by default");
+    draw_meter(screen, 0, 1, 4, 0.5f, gradient_of(WHITE, WHITE), BLACK, (MeterGlyphs){ '#', '-' });
+    test_check_str(test, row_text(test, screen, 1), S("##--"), "filled, then empty");
+
+    History history = { 0 };
+    history_push(&history, -1.0f);
+    history_push(&history, 0.5f);
+    history_push(&history, 1.0f);
+    draw_sparkline(screen, 0, 2, 3, &history, 1.0f, gradient_of(WHITE, WHITE), BLACK, S(""));
+    test_check_str(test, row_text(test, screen, 2), S("▁▄█+"), "eighth blocks by default");
+    draw_sparkline(screen, 0, 2, 3, &history, 1.0f, gradient_of(WHITE, WHITE), BLACK, S("_-^"));
+    test_check_str(test, row_text(test, screen, 2), S("_-^+"), "levels from the theme");
+    screen_destroy(screen);
+}
+
 // Strings styled for the inline output draw into cells: a box from
 // box_render keeps its colours and the backgrounds around it.
 static void screen_draws_styled_text(Test *test)
@@ -248,6 +277,7 @@ const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_writes_only_what_changed", screen_writes_only_what_changed },
     { "screen_keeps_wide_glyphs_whole", screen_keeps_wide_glyphs_whole },
     { "graphs_plot_in_braille", graphs_plot_in_braille },
+    { "panels_meters_and_sparklines_take_glyphs", panels_meters_and_sparklines_take_glyphs },
     { "screen_draws_styled_text", screen_draws_styled_text },
     { "screen_wraps_log_lines", screen_wraps_log_lines },
     { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
