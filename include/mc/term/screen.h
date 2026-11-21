@@ -12,6 +12,10 @@ enum {
     ATTR_DIM = 1 << 1,
     ATTR_ITALIC = 1 << 2,
     ATTR_UNDERLINE = 1 << 3,
+    // The terminal's own foreground or background, for transparent
+    // terminals; the cell's colour is then only a guess at it.
+    ATTR_DEFAULT_FG = 1 << 4,
+    ATTR_DEFAULT_BG = 1 << 5,
 };
 
 // Cell is one column of one row. A glyph of 0 is the right half of the wide
@@ -46,6 +50,10 @@ int screen_height(const Screen *screen);
 Cell *screen_cell(Screen *screen, int x, int y);
 // screen_paint fills rect with blanks on bg.
 void screen_paint(Screen *screen, Rect rect, Rgb bg);
+// screen_paint_default fills rect with blanks on the terminal's own
+// background. bg stands in for it where a colour is needed: shading a cell
+// shades the stand-in, which is then the cell's own colour.
+void screen_paint_default(Screen *screen, Rect rect, Rgb bg);
 // screen_glyph puts one glyph and keeps the background already there.
 void screen_glyph(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t attrs);
 // screen_text puts UTF-8 text from (x, y), at most max_columns wide, over
@@ -78,7 +86,8 @@ int wrapped_rows(String text, int width);
 // wrapped at width, where a cursor at its end would be.
 void wrapped_end(String text, int width, int *row, int *column);
 
-// screen_shade darkens every colour in rect, as under an overlay.
+// screen_shade darkens every colour in rect, as under an overlay, the
+// terminal's own as their stand-ins.
 void screen_shade(Screen *screen, Rect rect, double factor);
 // screen_render appends to out what brings the terminal from the last
 // rendered picture to this one.

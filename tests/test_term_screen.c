@@ -161,6 +161,31 @@ static void screen_wraps_with_the_theme_colours(Test *test)
     screen_destroy(screen);
 }
 
+static void screen_keeps_the_terminal_colours(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 3, 1);
+    screen_paint_default(screen, (Rect){ 0, 0, 3, 1 }, BLACK);
+    screen_text(screen, 0, 0, 1, S("a"), WHITE, ATTR_DEFAULT_FG | ATTR_BOLD);
+    screen_text(screen, 1, 0, 1, S("b"), WHITE, 0);
+    screen_styled(screen, 2, 0, 1, S("\x1b[41mc"), WHITE, 0);
+    test_check_str(test, render_screen(test, screen),
+                   S("\x1b[1;1H\x1b[0;1ma\x1b[0;38;2;255;255;255mb\x1b[0;38;2;255;255;255;48;2;205;0;0mc"),
+                   "no colour where the terminal's own shows, and text keeps the background under it");
+    test_check(test, screen_cell(screen, 1, 0)->attrs == ATTR_DEFAULT_BG, "the flag stays on the cell");
+    screen_shade(screen, (Rect){ 0, 0, 1, 1 }, 0.5);
+    test_check(test, rgb_equal(screen_cell(screen, 0, 0)->fg, rgb_scale(WHITE, 0.5)) &&
+                         screen_cell(screen, 0, 0)->attrs == ATTR_BOLD,
+               "shading darkens the stand-ins, which become the cell's colours");
+
+    screen_paint(screen, (Rect){ 0, 0, 3, 1 }, BLACK);
+    screen_styled(screen, 0, 0, 3, S("a\x1b[31mb\x1b[39mc"), WHITE, ATTR_DEFAULT_FG);
+    test_check(test, screen_cell(screen, 0, 0)->attrs == ATTR_DEFAULT_FG &&
+                         screen_cell(screen, 1, 0)->attrs == 0 && screen_cell(screen, 2, 0)->attrs == ATTR_DEFAULT_FG,
+               "a colour from SGR replaces the terminal's, and 39 brings it back");
+    screen_destroy(screen);
+}
+
 static void rects_hold_their_cells(Test *test)
 {
     Rect rect = { 2, 3, 4, 5 };
@@ -177,6 +202,7 @@ const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_draws_styled_text", screen_draws_styled_text },
     { "screen_wraps_log_lines", screen_wraps_log_lines },
     { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
+    { "screen_keeps_the_terminal_colours", screen_keeps_the_terminal_colours },
     { "rects_hold_their_cells", rects_hold_their_cells },
     { nullptr, nullptr },
 };

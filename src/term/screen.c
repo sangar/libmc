@@ -91,6 +91,19 @@ void screen_paint(Screen *screen, Rect rect, Rgb bg)
     }
 }
 
+void screen_paint_default(Screen *screen, Rect rect, Rgb bg)
+{
+    screen_paint(screen, rect, bg);
+    for (int y = rect.y; y < rect.y + rect.height; y++) {
+        for (int x = rect.x; x < rect.x + rect.width; x++) {
+            Cell *cell = screen_cell(screen, x, y);
+            if (cell != nullptr) {
+                cell->attrs = ATTR_DEFAULT_BG;
+            }
+        }
+    }
+}
+
 // set_cell writes one column and keeps wide glyphs whole: a half that loses
 // its other half becomes a blank.
 static void set_cell(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t attrs)
@@ -108,7 +121,7 @@ static void set_cell(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8
     }
     cell->glyph = glyph;
     cell->fg = fg;
-    cell->attrs = attrs;
+    cell->attrs = (uint8_t)((attrs & ~ATTR_DEFAULT_BG) | (cell->attrs & ATTR_DEFAULT_BG));
 }
 
 static int put(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t attrs)
@@ -217,10 +230,13 @@ static void apply_sgr(Ink *ink, String text, Ink plain, const Rgb *ansi)
             ink->reverse = p == 7;
         } else if (p >= 30 && p <= 37) {
             ink->fg = basic_color(ansi, p - 30);
+            ink->attrs = (uint8_t)(ink->attrs & ~ATTR_DEFAULT_FG);
         } else if (p >= 90 && p <= 97) {
             ink->fg = basic_color(ansi, p - 90 + 8);
+            ink->attrs = (uint8_t)(ink->attrs & ~ATTR_DEFAULT_FG);
         } else if (p == 39) {
             ink->fg = plain.fg;
+            ink->attrs = (uint8_t)((ink->attrs & ~ATTR_DEFAULT_FG) | (plain.attrs & ATTR_DEFAULT_FG));
         } else if (p >= 40 && p <= 47) {
             ink->bg = basic_color(ansi, p - 40);
             ink->has_bg = true;
@@ -230,7 +246,9 @@ static void apply_sgr(Ink *ink, String text, Ink plain, const Rgb *ansi)
         } else if (p == 49) {
             ink->has_bg = false;
         } else if (p == 38) {
-            extended_color(params, count, &i, &ink->fg);
+            if (extended_color(params, count, &i, &ink->fg)) {
+                ink->attrs = (uint8_t)(ink->attrs & ~ATTR_DEFAULT_FG);
+            }
         } else if (p == 48) {
             ink->has_bg = extended_color(params, count, &i, &ink->bg) || ink->has_bg;
         }
@@ -257,7 +275,8 @@ static bool next_glyph(String text, size_t *position, Ink *ink, Ink plain, const
 }
 
 // put_ink is put with ink's background, or with reverse video the colours
-// swapped over the background already there.
+// swapped over the background already there. Reverse video swaps what the
+// cells hold, so a terminal's own colour becomes the guess at it.
 static int put_ink(Screen *screen, int x, int y, uint32_t glyph, Ink ink)
 {
     Cell *cell = screen_cell(screen, x, y);
@@ -265,13 +284,19 @@ static int put_ink(Screen *screen, int x, int y, uint32_t glyph, Ink ink)
         return 0;
     }
     Rgb bg = ink.has_bg ? ink.bg : cell->bg;
+    bool default_bg = !ink.has_bg && (cell->attrs & ATTR_DEFAULT_BG) != 0;
     if (ink.reverse) {
-        bg = ink.fg;
-        ink.fg = ink.has_bg ? ink.bg : cell->bg;
+        Rgb fg = ink.fg;
+        ink.fg = bg;
+        bg = fg;
+        default_bg = false;
+        ink.attrs = (uint8_t)(ink.attrs & ~ATTR_DEFAULT_FG);
     }
     int written = put(screen, x, y, glyph, ink.fg, ink.attrs);
     for (int i = 0; i < written; i++) {
-        screen_cell(screen, x + i, y)->bg = bg;
+        Cell *placed = screen_cell(screen, x + i, y);
+        placed->bg = bg;
+        placed->attrs = (uint8_t)(default_bg ? placed->attrs | ATTR_DEFAULT_BG : placed->attrs & ~ATTR_DEFAULT_BG);
     }
     return written;
 }
@@ -374,6 +399,7 @@ void screen_shade(Screen *screen, Rect rect, double factor)
             if (cell != nullptr) {
                 cell->fg = rgb_scale(cell->fg, factor);
                 cell->bg = rgb_scale(cell->bg, factor);
+                cell->attrs = (uint8_t)(cell->attrs & ~(ATTR_DEFAULT_FG | ATTR_DEFAULT_BG));
             }
         }
     }
@@ -400,6 +426,8 @@ typedef struct {
 static void use_pen(StringBuilder *out, ColorDepth depth, Pen *pen, const Cell *cell)
 {
     bool colored = depth != COLOR_DEPTH_NONE;
+    bool own_fg = colored && (cell->attrs & ATTR_DEFAULT_FG) == 0;
+    bool own_bg = colored && (cell->attrs & ATTR_DEFAULT_BG) == 0;
     if (!pen->known || pen->attrs != cell->attrs) {
         str_builder_append(out, S("\x1b[0"));
         static const char *const CODES[] = { ";1", ";2", ";3", ";4" };
@@ -408,9 +436,11 @@ static void use_pen(StringBuilder *out, ColorDepth depth, Pen *pen, const Cell *
                 str_builder_append(out, S(CODES[i]));
             }
         }
-        if (colored) {
+        if (own_fg) {
             str_builder_append_char(out, ';');
             sgr_append_color(out, depth, cell->fg, false);
+        }
+        if (own_bg) {
             str_builder_append_char(out, ';');
             sgr_append_color(out, depth, cell->bg, true);
         }
@@ -418,13 +448,13 @@ static void use_pen(StringBuilder *out, ColorDepth depth, Pen *pen, const Cell *
         *pen = (Pen){ .fg = cell->fg, .bg = cell->bg, .attrs = cell->attrs, .known = true };
         return;
     }
-    if (colored && !rgb_equal(pen->fg, cell->fg)) {
+    if (own_fg && !rgb_equal(pen->fg, cell->fg)) {
         str_builder_append(out, S("\x1b["));
         sgr_append_color(out, depth, cell->fg, false);
         str_builder_append_char(out, 'm');
         pen->fg = cell->fg;
     }
-    if (colored && !rgb_equal(pen->bg, cell->bg)) {
+    if (own_bg && !rgb_equal(pen->bg, cell->bg)) {
         str_builder_append(out, S("\x1b["));
         sgr_append_color(out, depth, cell->bg, true);
         str_builder_append_char(out, 'm');
