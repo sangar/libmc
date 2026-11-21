@@ -89,6 +89,10 @@ void wrapped_end(String text, int width, int *row, int *column);
 // screen_shade darkens every colour in rect, as under an overlay, the
 // terminal's own as their stand-ins.
 void screen_shade(Screen *screen, Rect rect, double factor);
+// screen_fade mixes every colour in rect toward toward by t, in OKLab, as
+// screen_shade does toward black, the terminal's own as their stand-ins;
+// over a light background, fade toward it.
+void screen_fade(Screen *screen, Rect rect, Rgb toward, double t);
 // screen_render appends to out what brings the terminal from the last
 // rendered picture to this one.
 void screen_render(Screen *screen, StringBuilder *out);

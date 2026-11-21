@@ -186,6 +186,21 @@ static void screen_keeps_the_terminal_colours(Test *test)
     screen_destroy(screen);
 }
 
+static void screen_fades_toward_a_colour(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 2, 1);
+    screen_paint(screen, (Rect){ 0, 0, 2, 1 }, BLACK);
+    screen_text(screen, 0, 0, 2, S("ab"), WHITE, 0);
+    screen_fade(screen, (Rect){ 1, 0, 1, 1 }, WHITE, 0.5);
+    Cell *a = screen_cell(screen, 0, 0);
+    Cell *b = screen_cell(screen, 1, 0);
+    test_check(test, rgb_equal(a->bg, BLACK) && rgb_equal(a->fg, WHITE), "outside rect stays");
+    test_check(test, rgb_equal(b->bg, rgb_mix_oklab(BLACK, WHITE, 0.5)) && rgb_equal(b->fg, WHITE),
+               "inside, the colours move toward white");
+    screen_destroy(screen);
+}
+
 static void rects_hold_their_cells(Test *test)
 {
     Rect rect = { 2, 3, 4, 5 };
@@ -203,6 +218,7 @@ const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_wraps_log_lines", screen_wraps_log_lines },
     { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
     { "screen_keeps_the_terminal_colours", screen_keeps_the_terminal_colours },
+    { "screen_fades_toward_a_colour", screen_fades_toward_a_colour },
     { "rects_hold_their_cells", rects_hold_their_cells },
     { nullptr, nullptr },
 };

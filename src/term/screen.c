@@ -405,6 +405,20 @@ void screen_shade(Screen *screen, Rect rect, double factor)
     }
 }
 
+void screen_fade(Screen *screen, Rect rect, Rgb toward, double t)
+{
+    for (int y = rect.y; y < rect.y + rect.height; y++) {
+        for (int x = rect.x; x < rect.x + rect.width; x++) {
+            Cell *cell = screen_cell(screen, x, y);
+            if (cell != nullptr) {
+                cell->fg = rgb_mix_oklab(cell->fg, toward, t);
+                cell->bg = rgb_mix_oklab(cell->bg, toward, t);
+                cell->attrs = (uint8_t)(cell->attrs & ~(ATTR_DEFAULT_FG | ATTR_DEFAULT_BG));
+            }
+        }
+    }
+}
+
 void screen_invalidate(Screen *screen)
 {
     screen->repaint = true;
