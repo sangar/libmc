@@ -5,7 +5,7 @@
 #include "mc/term/ansi.h"
 #include "mc/text/utf8.h"
 
-enum { ESC = 0x1b, SGR_PARAMS = 32, TAB_STOP = 8 };
+enum { ESC = 0x1b, SGR_PARAMS = 32, TAB_STOP = 8, LINK_CAPACITY = 1024, LINK_MAX_BYTES = 2048 };
 
 struct Screen {
     Arena *arena;   // the Screen itself
@@ -16,6 +16,9 @@ struct Screen {
     Cell *cells;
     Cell *shown; // what the terminal shows, as of the last render
     bool repaint;
+    Arena *links; // the uris of links, for link ids 1 to link_count
+    String *uris;
+    uint16_t link_count;
 };
 
 static const Cell BLANK = { .glyph = ' ' };
@@ -28,11 +31,14 @@ Screen *screen_create(ColorDepth depth)
     screen->buffers = arena_create(0);
     screen->depth = depth;
     screen->repaint = true;
+    screen->links = arena_create(0);
+    screen->uris = arena_push(screen->links, LINK_CAPACITY * sizeof(String));
     return screen;
 }
 
 void screen_destroy(Screen *screen)
 {
+    arena_destroy(screen->links);
     arena_destroy(screen->buffers);
     arena_destroy(screen->arena);
 }
@@ -91,6 +97,19 @@ void screen_paint(Screen *screen, Rect rect, Rgb bg)
     }
 }
 
+void screen_paint_default(Screen *screen, Rect rect, Rgb bg)
+{
+    screen_paint(screen, rect, bg);
+    for (int y = rect.y; y < rect.y + rect.height; y++) {
+        for (int x = rect.x; x < rect.x + rect.width; x++) {
+            Cell *cell = screen_cell(screen, x, y);
+            if (cell != nullptr) {
+                cell->attrs = ATTR_DEFAULT_BG;
+            }
+        }
+    }
+}
+
 // set_cell writes one column and keeps wide glyphs whole: a half that loses
 // its other half becomes a blank.
 static void set_cell(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t attrs)
@@ -108,7 +127,8 @@ static void set_cell(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8
     }
     cell->glyph = glyph;
     cell->fg = fg;
-    cell->attrs = attrs;
+    cell->attrs = (uint8_t)((attrs & ~ATTR_DEFAULT_BG) | (cell->attrs & ATTR_DEFAULT_BG));
+    cell->link = 0;
 }
 
 static int put(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t attrs)
@@ -217,10 +237,13 @@ static void apply_sgr(Ink *ink, String text, Ink plain, const Rgb *ansi)
             ink->reverse = p == 7;
         } else if (p >= 30 && p <= 37) {
             ink->fg = basic_color(ansi, p - 30);
+            ink->attrs = (uint8_t)(ink->attrs & ~ATTR_DEFAULT_FG);
         } else if (p >= 90 && p <= 97) {
             ink->fg = basic_color(ansi, p - 90 + 8);
+            ink->attrs = (uint8_t)(ink->attrs & ~ATTR_DEFAULT_FG);
         } else if (p == 39) {
             ink->fg = plain.fg;
+            ink->attrs = (uint8_t)((ink->attrs & ~ATTR_DEFAULT_FG) | (plain.attrs & ATTR_DEFAULT_FG));
         } else if (p >= 40 && p <= 47) {
             ink->bg = basic_color(ansi, p - 40);
             ink->has_bg = true;
@@ -230,7 +253,9 @@ static void apply_sgr(Ink *ink, String text, Ink plain, const Rgb *ansi)
         } else if (p == 49) {
             ink->has_bg = false;
         } else if (p == 38) {
-            extended_color(params, count, &i, &ink->fg);
+            if (extended_color(params, count, &i, &ink->fg)) {
+                ink->attrs = (uint8_t)(ink->attrs & ~ATTR_DEFAULT_FG);
+            }
         } else if (p == 48) {
             ink->has_bg = extended_color(params, count, &i, &ink->bg) || ink->has_bg;
         }
@@ -257,7 +282,8 @@ static bool next_glyph(String text, size_t *position, Ink *ink, Ink plain, const
 }
 
 // put_ink is put with ink's background, or with reverse video the colours
-// swapped over the background already there.
+// swapped over the background already there. Reverse video swaps what the
+// cells hold, so a terminal's own colour becomes the guess at it.
 static int put_ink(Screen *screen, int x, int y, uint32_t glyph, Ink ink)
 {
     Cell *cell = screen_cell(screen, x, y);
@@ -265,13 +291,19 @@ static int put_ink(Screen *screen, int x, int y, uint32_t glyph, Ink ink)
         return 0;
     }
     Rgb bg = ink.has_bg ? ink.bg : cell->bg;
+    bool default_bg = !ink.has_bg && (cell->attrs & ATTR_DEFAULT_BG) != 0;
     if (ink.reverse) {
-        bg = ink.fg;
-        ink.fg = ink.has_bg ? ink.bg : cell->bg;
+        Rgb fg = ink.fg;
+        ink.fg = bg;
+        bg = fg;
+        default_bg = false;
+        ink.attrs = (uint8_t)(ink.attrs & ~ATTR_DEFAULT_FG);
     }
     int written = put(screen, x, y, glyph, ink.fg, ink.attrs);
     for (int i = 0; i < written; i++) {
-        screen_cell(screen, x + i, y)->bg = bg;
+        Cell *placed = screen_cell(screen, x + i, y);
+        placed->bg = bg;
+        placed->attrs = (uint8_t)(default_bg ? placed->attrs | ATTR_DEFAULT_BG : placed->attrs & ~ATTR_DEFAULT_BG);
     }
     return written;
 }
@@ -366,6 +398,71 @@ void wrapped_end(String text, int width, int *row, int *column)
     *column = full ? 0 : wrap.column;
 }
 
+uint16_t screen_link(Screen *screen, String uri)
+{
+    if (uri.len == 0 || uri.len > LINK_MAX_BYTES) {
+        return 0;
+    }
+    for (size_t i = 0; i < uri.len; i++) {
+        // OSC 8 takes printable ASCII; anything else could end the
+        // sequence, as a C1 ST in UTF-8 does, and must be percent-encoded.
+        unsigned char byte = (unsigned char)uri.data[i];
+        if (byte < 0x20 || byte > 0x7e) {
+            return 0;
+        }
+    }
+    for (uint16_t i = 0; i < screen->link_count; i++) {
+        if (str_equal(screen->uris[i], uri)) {
+            return (uint16_t)(i + 1);
+        }
+    }
+    if (screen->link_count == LINK_CAPACITY) {
+        return 0;
+    }
+    screen->uris[screen->link_count++] = str_copy(screen->links, uri);
+    return screen->link_count;
+}
+
+void screen_mark_link(Screen *screen, Rect rect, uint16_t link)
+{
+    if (link > screen->link_count) {
+        link = 0;
+    }
+    for (int y = rect.y; y < rect.y + rect.height; y++) {
+        for (int x = rect.x; x < rect.x + rect.width; x++) {
+            Cell *cell = screen_cell(screen, x, y);
+            if (cell != nullptr) {
+                cell->link = link;
+            }
+        }
+    }
+}
+
+// forget_links keeps only the links the cells show, so that a screen that
+// shows many links over time does not run out of ids. It runs after a
+// render, when the cells are what the terminal shows.
+static void forget_links(Screen *screen)
+{
+    uint16_t kept_ids[LINK_CAPACITY + 1] = { 0 };
+    Arena *kept = arena_create(0);
+    String *uris = arena_push(kept, LINK_CAPACITY * sizeof(String));
+    uint16_t count = 0;
+    size_t cells = (size_t)screen->width * (size_t)screen->height;
+    for (size_t i = 0; i < cells; i++) {
+        uint16_t link = screen->cells[i].link;
+        if (link != 0 && kept_ids[link] == 0) {
+            uris[count] = str_copy(kept, screen->uris[link - 1]);
+            kept_ids[link] = ++count;
+        }
+        screen->cells[i].link = kept_ids[link];
+        screen->shown[i].link = kept_ids[link];
+    }
+    arena_destroy(screen->links);
+    screen->links = kept;
+    screen->uris = uris;
+    screen->link_count = count;
+}
+
 void screen_shade(Screen *screen, Rect rect, double factor)
 {
     for (int y = rect.y; y < rect.y + rect.height; y++) {
@@ -374,6 +471,21 @@ void screen_shade(Screen *screen, Rect rect, double factor)
             if (cell != nullptr) {
                 cell->fg = rgb_scale(cell->fg, factor);
                 cell->bg = rgb_scale(cell->bg, factor);
+                cell->attrs = (uint8_t)(cell->attrs & ~(ATTR_DEFAULT_FG | ATTR_DEFAULT_BG));
+            }
+        }
+    }
+}
+
+void screen_fade(Screen *screen, Rect rect, Rgb toward, double t)
+{
+    for (int y = rect.y; y < rect.y + rect.height; y++) {
+        for (int x = rect.x; x < rect.x + rect.width; x++) {
+            Cell *cell = screen_cell(screen, x, y);
+            if (cell != nullptr) {
+                cell->fg = rgb_mix_oklab(cell->fg, toward, t);
+                cell->bg = rgb_mix_oklab(cell->bg, toward, t);
+                cell->attrs = (uint8_t)(cell->attrs & ~(ATTR_DEFAULT_FG | ATTR_DEFAULT_BG));
             }
         }
     }
@@ -386,7 +498,8 @@ void screen_invalidate(Screen *screen)
 
 static bool cell_equal(const Cell *a, const Cell *b)
 {
-    return a->glyph == b->glyph && a->attrs == b->attrs && rgb_equal(a->fg, b->fg) && rgb_equal(a->bg, b->bg);
+    return a->glyph == b->glyph && a->attrs == b->attrs && a->link == b->link && rgb_equal(a->fg, b->fg) &&
+           rgb_equal(a->bg, b->bg);
 }
 
 // Pen is the style the terminal writes with.
@@ -395,11 +508,27 @@ typedef struct {
     Rgb bg;
     uint8_t attrs;
     bool known;
+    uint16_t link;
 } Pen;
+
+static void use_link(StringBuilder *out, const Screen *screen, Pen *pen, uint16_t link)
+{
+    if (pen->link == link) {
+        return;
+    }
+    str_builder_append(out, S("\x1b]8;;"));
+    if (link != 0) {
+        str_builder_append(out, screen->uris[link - 1]);
+    }
+    str_builder_append(out, S("\x1b\\"));
+    pen->link = link;
+}
 
 static void use_pen(StringBuilder *out, ColorDepth depth, Pen *pen, const Cell *cell)
 {
     bool colored = depth != COLOR_DEPTH_NONE;
+    bool own_fg = colored && (cell->attrs & ATTR_DEFAULT_FG) == 0;
+    bool own_bg = colored && (cell->attrs & ATTR_DEFAULT_BG) == 0;
     if (!pen->known || pen->attrs != cell->attrs) {
         str_builder_append(out, S("\x1b[0"));
         static const char *const CODES[] = { ";1", ";2", ";3", ";4" };
@@ -408,9 +537,11 @@ static void use_pen(StringBuilder *out, ColorDepth depth, Pen *pen, const Cell *
                 str_builder_append(out, S(CODES[i]));
             }
         }
-        if (colored) {
+        if (own_fg) {
             str_builder_append_char(out, ';');
             sgr_append_color(out, depth, cell->fg, false);
+        }
+        if (own_bg) {
             str_builder_append_char(out, ';');
             sgr_append_color(out, depth, cell->bg, true);
         }
@@ -418,13 +549,13 @@ static void use_pen(StringBuilder *out, ColorDepth depth, Pen *pen, const Cell *
         *pen = (Pen){ .fg = cell->fg, .bg = cell->bg, .attrs = cell->attrs, .known = true };
         return;
     }
-    if (colored && !rgb_equal(pen->fg, cell->fg)) {
+    if (own_fg && !rgb_equal(pen->fg, cell->fg)) {
         str_builder_append(out, S("\x1b["));
         sgr_append_color(out, depth, cell->fg, false);
         str_builder_append_char(out, 'm');
         pen->fg = cell->fg;
     }
-    if (colored && !rgb_equal(pen->bg, cell->bg)) {
+    if (own_bg && !rgb_equal(pen->bg, cell->bg)) {
         str_builder_append(out, S("\x1b["));
         sgr_append_color(out, depth, cell->bg, true);
         str_builder_append_char(out, 'm');
@@ -447,6 +578,7 @@ void screen_render(Screen *screen, StringBuilder *out)
             if (cursor_x != x || cursor_y != y) {
                 str_builder_append_format(out, "\x1b[%d;%dH", y + 1, x + 1);
             }
+            use_link(out, screen, &pen, cell->link);
             use_pen(out, screen->depth, &pen, cell);
             char bytes[UTF8_MAX_BYTES];
             str_builder_append(out, (String) { bytes, utf8_encode(cell->glyph, bytes) });
@@ -457,9 +589,13 @@ void screen_render(Screen *screen, StringBuilder *out)
             }
         }
     }
+    use_link(out, screen, &pen, 0);
     size_t count = (size_t)screen->width * (size_t)screen->height;
     if (count > 0) {
         memcpy(screen->shown, screen->cells, count * sizeof(Cell));
     }
     screen->repaint = false;
+    if (screen->link_count > LINK_CAPACITY / 2) {
+        forget_links(screen);
+    }
 }

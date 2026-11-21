@@ -12,15 +12,21 @@ enum {
     ATTR_DIM = 1 << 1,
     ATTR_ITALIC = 1 << 2,
     ATTR_UNDERLINE = 1 << 3,
+    // The terminal's own foreground or background, for transparent
+    // terminals; the cell's colour is then only a guess at it.
+    ATTR_DEFAULT_FG = 1 << 4,
+    ATTR_DEFAULT_BG = 1 << 5,
 };
 
 // Cell is one column of one row. A glyph of 0 is the right half of the wide
-// glyph to its left.
+// glyph to its left. link is 0, or what screen_link returned for the
+// hyperlink the cell is part of.
 typedef struct Cell {
     uint32_t glyph;
     Rgb fg;
     Rgb bg;
     uint8_t attrs;
+    uint16_t link;
 } Cell;
 
 typedef struct Rect {
@@ -46,6 +52,10 @@ int screen_height(const Screen *screen);
 Cell *screen_cell(Screen *screen, int x, int y);
 // screen_paint fills rect with blanks on bg.
 void screen_paint(Screen *screen, Rect rect, Rgb bg);
+// screen_paint_default fills rect with blanks on the terminal's own
+// background. bg stands in for it where a colour is needed: shading a cell
+// shades the stand-in, which is then the cell's own colour.
+void screen_paint_default(Screen *screen, Rect rect, Rgb bg);
 // screen_glyph puts one glyph and keeps the background already there.
 void screen_glyph(Screen *screen, int x, int y, uint32_t glyph, Rgb fg, uint8_t attrs);
 // screen_text puts UTF-8 text from (x, y), at most max_columns wide, over
@@ -78,8 +88,24 @@ int wrapped_rows(String text, int width);
 // wrapped at width, where a cursor at its end would be.
 void wrapped_end(String text, int width, int *row, int *column);
 
-// screen_shade darkens every colour in rect, as under an overlay.
+// screen_link is the id that makes cells a hyperlink to uri, written as
+// OSC 8, for screen_mark_link. It is 0, no link, for an empty uri, one over
+// 2048 bytes or with a byte outside printable ASCII, and while the screen
+// holds 1024 links.
+// Ask for ids each frame: a render may forget the links no cell shows.
+uint16_t screen_link(Screen *screen, String uri);
+// screen_mark_link makes the cells in rect part of link, or of none for an
+// id the screen does not hold; drawing a glyph over a cell takes it out
+// again, so mark after drawing.
+void screen_mark_link(Screen *screen, Rect rect, uint16_t link);
+
+// screen_shade darkens every colour in rect, as under an overlay, the
+// terminal's own as their stand-ins.
 void screen_shade(Screen *screen, Rect rect, double factor);
+// screen_fade mixes every colour in rect toward toward by t, in OKLab, as
+// screen_shade does toward black, the terminal's own as their stand-ins;
+// over a light background, fade toward it.
+void screen_fade(Screen *screen, Rect rect, Rgb toward, double t);
 // screen_render appends to out what brings the terminal from the last
 // rendered picture to this one.
 void screen_render(Screen *screen, StringBuilder *out);

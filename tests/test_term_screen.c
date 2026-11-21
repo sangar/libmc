@@ -1,5 +1,7 @@
 #include "test.h"
 
+#include <stdio.h>
+
 #include "mc/term/draw.h"
 #include "mc/term/layout.h"
 #include "mc/term/progress.h"
@@ -74,6 +76,35 @@ static void graphs_plot_in_braille(Test *test)
     screen_paint(screen, (Rect) { 0, 0, 1, 2 }, BLACK);
     draw_graph(screen, (Rect) { 0, 0, 1, 2 }, &history, 4.0f, gradient, true);
     test_check(test, screen_cell(screen, 0, 0)->glyph == 0x2800 + (0x08 | 0x10 | 0x01), "a downward graph hangs");
+    screen_destroy(screen);
+}
+
+static String row_text(Test *test, Screen *screen, int y);
+
+static void panels_meters_and_sparklines_take_glyphs(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 4, 3);
+    draw_panel(screen, (Rect){ 0, 0, 4, 3 }, (Panel){ .border = WHITE, .glow = WHITE });
+    test_check_str(test, row_text(test, screen, 0), S("╭──╮"), "rounded by default");
+    Panel ascii = { .border = WHITE, .glow = WHITE, .glyphs = { '-', '|', '+', '+', '+', '+', '[', ']' } };
+    draw_panel(screen, (Rect){ 0, 0, 4, 3 }, ascii);
+    test_check_str(test, row_text(test, screen, 0), S("+--+"), "the top edge");
+    test_check_str(test, row_text(test, screen, 1), S("|  |"), "the sides");
+
+    draw_meter(screen, 0, 1, 4, 0.5f, gradient_of(WHITE, WHITE), BLACK, (MeterGlyphs){ 0 });
+    test_check_str(test, row_text(test, screen, 1), S("■■■■"), "squares by default");
+    draw_meter(screen, 0, 1, 4, 0.5f, gradient_of(WHITE, WHITE), BLACK, (MeterGlyphs){ '#', '-' });
+    test_check_str(test, row_text(test, screen, 1), S("##--"), "filled, then empty");
+
+    History history = { 0 };
+    history_push(&history, -1.0f);
+    history_push(&history, 0.5f);
+    history_push(&history, 1.0f);
+    draw_sparkline(screen, 0, 2, 3, &history, 1.0f, gradient_of(WHITE, WHITE), BLACK, S(""));
+    test_check_str(test, row_text(test, screen, 2), S("▁▄█+"), "eighth blocks by default");
+    draw_sparkline(screen, 0, 2, 3, &history, 1.0f, gradient_of(WHITE, WHITE), BLACK, S("_-^"));
+    test_check_str(test, row_text(test, screen, 2), S("_-^+"), "levels from the theme");
     screen_destroy(screen);
 }
 
@@ -161,6 +192,78 @@ static void screen_wraps_with_the_theme_colours(Test *test)
     screen_destroy(screen);
 }
 
+static void screen_keeps_the_terminal_colours(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 3, 1);
+    screen_paint_default(screen, (Rect){ 0, 0, 3, 1 }, BLACK);
+    screen_text(screen, 0, 0, 1, S("a"), WHITE, ATTR_DEFAULT_FG | ATTR_BOLD);
+    screen_text(screen, 1, 0, 1, S("b"), WHITE, 0);
+    screen_styled(screen, 2, 0, 1, S("\x1b[41mc"), WHITE, 0);
+    test_check_str(test, render_screen(test, screen),
+                   S("\x1b[1;1H\x1b[0;1ma\x1b[0;38;2;255;255;255mb\x1b[0;38;2;255;255;255;48;2;205;0;0mc"),
+                   "no colour where the terminal's own shows, and text keeps the background under it");
+    test_check(test, screen_cell(screen, 1, 0)->attrs == ATTR_DEFAULT_BG, "the flag stays on the cell");
+    screen_shade(screen, (Rect){ 0, 0, 1, 1 }, 0.5);
+    test_check(test, rgb_equal(screen_cell(screen, 0, 0)->fg, rgb_scale(WHITE, 0.5)) &&
+                         screen_cell(screen, 0, 0)->attrs == ATTR_BOLD,
+               "shading darkens the stand-ins, which become the cell's colours");
+
+    screen_paint(screen, (Rect){ 0, 0, 3, 1 }, BLACK);
+    screen_styled(screen, 0, 0, 3, S("a\x1b[31mb\x1b[39mc"), WHITE, ATTR_DEFAULT_FG);
+    test_check(test, screen_cell(screen, 0, 0)->attrs == ATTR_DEFAULT_FG &&
+                         screen_cell(screen, 1, 0)->attrs == 0 && screen_cell(screen, 2, 0)->attrs == ATTR_DEFAULT_FG,
+               "a colour from SGR replaces the terminal's, and 39 brings it back");
+    screen_destroy(screen);
+}
+
+static void screen_fades_toward_a_colour(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_TRUE);
+    screen_resize(screen, 2, 1);
+    screen_paint(screen, (Rect){ 0, 0, 2, 1 }, BLACK);
+    screen_text(screen, 0, 0, 2, S("ab"), WHITE, 0);
+    screen_fade(screen, (Rect){ 1, 0, 1, 1 }, WHITE, 0.5);
+    Cell *a = screen_cell(screen, 0, 0);
+    Cell *b = screen_cell(screen, 1, 0);
+    test_check(test, rgb_equal(a->bg, BLACK) && rgb_equal(a->fg, WHITE), "outside rect stays");
+    test_check(test, rgb_equal(b->bg, rgb_mix_oklab(BLACK, WHITE, 0.5)) && rgb_equal(b->fg, WHITE),
+               "inside, the colours move toward white");
+    screen_destroy(screen);
+}
+
+static void screen_writes_hyperlinks(Test *test)
+{
+    Screen *screen = screen_create(COLOR_DEPTH_NONE);
+    screen_resize(screen, 3, 1);
+    screen_text(screen, 0, 0, 3, S("abc"), WHITE, 0);
+    uint16_t link = screen_link(screen, S("https://example.com/"));
+    test_check(test, link != 0 && screen_link(screen, S("https://example.com/")) == link, "one id per uri");
+    test_check(test, screen_link(screen, S("https://x/\x1b]")) == 0 &&
+                         screen_link(screen, S("https://x/\xc2\x9c\xc2\x9b" "2J")) == 0 && screen_link(screen, S("")) == 0,
+               "no link with control bytes, C1 ones in UTF-8 too, or without a uri");
+    screen_mark_link(screen, (Rect){ 0, 0, 1, 1 }, 999);
+    screen_mark_link(screen, (Rect){ 1, 0, 2, 1 }, link);
+    test_check_str(test, render_screen(test, screen),
+                   S("\x1b[1;1H\x1b[0ma\x1b]8;;https://example.com/\x1b\\bc\x1b]8;;\x1b\\"),
+                   "the link opens before its cells and closes after");
+    screen_text(screen, 0, 0, 3, S("abc"), WHITE, 0);
+    screen_mark_link(screen, (Rect){ 1, 0, 2, 1 }, link);
+    test_check(test, render_screen(test, screen).len == 0, "an unchanged link writes nothing");
+    screen_text(screen, 2, 0, 1, S("d"), WHITE, 0);
+    test_check_str(test, render_screen(test, screen), S("\x1b[1;3H\x1b[0md"), "drawing over a cell takes it out");
+
+    char uri[32];
+    for (int i = 0; i < 600; i++) {
+        snprintf(uri, sizeof uri, "https://example.com/%d", i);
+        screen_mark_link(screen, (Rect){ 0, 0, 1, 1 }, screen_link(screen, S(uri)));
+    }
+    render_screen(test, screen);
+    test_check(test, screen_link(screen, S(uri)) == 1 && screen_link(screen, S("https://example.com/0")) == 3,
+               "links no cell shows are forgotten");
+    screen_destroy(screen);
+}
+
 static void rects_hold_their_cells(Test *test)
 {
     Rect rect = { 2, 3, 4, 5 };
@@ -174,9 +277,13 @@ const TestCase TERM_SCREEN_TESTS[] = {
     { "screen_writes_only_what_changed", screen_writes_only_what_changed },
     { "screen_keeps_wide_glyphs_whole", screen_keeps_wide_glyphs_whole },
     { "graphs_plot_in_braille", graphs_plot_in_braille },
+    { "panels_meters_and_sparklines_take_glyphs", panels_meters_and_sparklines_take_glyphs },
     { "screen_draws_styled_text", screen_draws_styled_text },
     { "screen_wraps_log_lines", screen_wraps_log_lines },
     { "screen_wraps_with_the_theme_colours", screen_wraps_with_the_theme_colours },
+    { "screen_keeps_the_terminal_colours", screen_keeps_the_terminal_colours },
+    { "screen_fades_toward_a_colour", screen_fades_toward_a_colour },
+    { "screen_writes_hyperlinks", screen_writes_hyperlinks },
     { "rects_hold_their_cells", rects_hold_their_cells },
     { nullptr, nullptr },
 };
