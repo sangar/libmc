@@ -57,9 +57,68 @@ static void test_gradient(Test *test)
                    S("\x1b[0;38;2;0;0;0mø\x1b[0;38;2;255;255;255ma\xcc\x8a\x1b[0m"), "first to last column");
 }
 
+static void test_mix_oklab(Test *test)
+{
+    Rgb black = rgb_hex(0x000000);
+    Rgb white = rgb_hex(0xffffff);
+    test_check(test, rgb_equal(rgb_mix_oklab(black, white, 0.0), black) &&
+                         rgb_equal(rgb_mix_oklab(black, white, 1.0), white),
+               "the ends are the colours");
+    test_check(test, rgb_equal(rgb_mix_oklab(black, white, 0.5), rgb_hex(0x636363)), "the middle is lightness 0.5");
+    const uint32_t colors[] = { 0xff0000, 0x00ff00, 0x0000ff, 0x1e1e2e, 0xf5c2e7, 0x808080 };
+    bool kept = true;
+    for (size_t i = 0; i < countof(colors); i++) {
+        Rgb color = rgb_hex(colors[i]);
+        kept = kept && rgb_equal(rgb_mix_oklab(color, color, 0.5), color);
+    }
+    test_check(test, kept, "a colour survives the trip through OKLab");
+    Rgb red_blue = rgb_mix_oklab(rgb_hex(0xff0000), rgb_hex(0x0000ff), 0.5);
+    Rgb linear = rgb_mix(rgb_hex(0xff0000), rgb_hex(0x0000ff), 0.5);
+    test_check(test, red_blue.r + red_blue.g + red_blue.b > linear.r + linear.g + linear.b,
+               "the middle of red and blue is not the muddy sRGB one");
+}
+
+static void test_dither(Test *test)
+{
+    Rgb between = rgb_mix(xterm_to_rgb(16 + 36), xterm_to_rgb(16 + 72), 0.5);
+    int high = 0;
+    bool palette = true;
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            Rgb cell = rgb_dither(between, COLOR_DEPTH_256, x, y);
+            high += rgb_equal(cell, xterm_to_rgb(16 + 72));
+            palette = palette && (rgb_equal(cell, xterm_to_rgb(16 + 72)) || rgb_equal(cell, xterm_to_rgb(16 + 36)));
+        }
+    }
+    test_check(test, palette && high == 8, "halfway between two levels, half the cells pick each");
+    Rgb grey = rgb_hex(0x535353);
+    test_check(test, rgb_to_xterm(rgb_dither(grey, COLOR_DEPTH_256, 1, 0)) >= 232, "a grey stays on the grey ramp");
+    int black = 0;
+    int white = 0;
+    for (int x = 0; x < 4; x++) {
+        for (int y = 0; y < 4; y++) {
+            black += rgb_equal(rgb_dither(rgb_hex(0x050505), COLOR_DEPTH_256, x, y), xterm_to_rgb(16));
+            white += rgb_equal(rgb_dither(rgb_hex(0xf6f6f6), COLOR_DEPTH_256, x, y), xterm_to_rgb(231));
+        }
+    }
+    test_check(test, black > 0 && black < 16 && white > 0 && white < 16,
+               "the ends of the grey ramp dither with black and white");
+    Rgb exact = xterm_to_rgb(16 + 36 * 2 + 6 * 3 + 4);
+    bool same = true;
+    for (int x = 0; x < 4; x++) {
+        same = same && rgb_equal(rgb_dither(exact, COLOR_DEPTH_256, x, 0), exact);
+    }
+    test_check(test, same, "a palette colour does not dither");
+    test_check(test, rgb_equal(rgb_dither(between, COLOR_DEPTH_TRUE, 1, 2), between) &&
+                         rgb_equal(rgb_dither(between, COLOR_DEPTH_16, 1, 2), between),
+               "other depths keep the colour");
+}
+
 const TestCase TERM_STYLE_TESTS[] = {
     { "color_depth", test_color_depth },
     { "style_per_depth", test_style_per_depth },
     { "gradient", test_gradient },
+    { "mix_oklab", test_mix_oklab },
+    { "dither", test_dither },
     { nullptr, nullptr },
 };

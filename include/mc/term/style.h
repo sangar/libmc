@@ -48,6 +48,11 @@ Style style_fg(Rgb fg);
 // foreground, or the background, at depth: 38;2;r;g;b, 38;5;n or 31, and
 // nothing at COLOR_DEPTH_NONE.
 void sgr_append_color(StringBuilder *out, ColorDepth depth, Rgb color, bool background);
+// rgb_dither is the colour to put at cell (x, y) so that a gradient at
+// 256 colours alternates the two palette colours around color in a 4x4
+// ordered pattern instead of banding. At 256 it returns a palette colour;
+// at other depths it returns color, which 16 colours show as the nearest.
+Rgb rgb_dither(Rgb color, ColorDepth depth, int x, int y);
 // style_append appends text in style, then a reset when style set anything.
 // At COLOR_DEPTH_NONE it appends text alone.
 void style_append(StringBuilder *out, ColorDepth depth, Style style, String text);

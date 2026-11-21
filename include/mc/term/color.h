@@ -23,6 +23,9 @@ bool rgb_equal(Rgb a, Rgb b);
 Rgb rgb_scale(Rgb color, double factor);
 // rgb_mix is a at 0 and b at 1; t is clamped to that range.
 Rgb rgb_mix(Rgb a, Rgb b, double t);
+// rgb_mix_oklab is rgb_mix through OKLab, so the middle looks halfway
+// between a and b instead of darker or greyer.
+Rgb rgb_mix_oklab(Rgb a, Rgb b, double t);
 Rgb gradient_at(Gradient gradient, double t);
 // gradient_of is the gradient from start to end through their mix.
 Gradient gradient_of(Rgb start, Rgb end);
