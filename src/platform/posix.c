@@ -2095,14 +2095,43 @@ void signal_watch_stop(SignalWatch *watch)
     arena_destroy(watch->arena);
 }
 
+static int signal_number(Signal signal)
+{
+    switch (signal) {
+    case SIGNAL_STOP:
+        return SIGTERM;
+    case SIGNAL_RELOAD:
+        return SIGHUP;
+    case SIGNAL_KILL:
+        return SIGKILL;
+    }
+    return SIGTERM;
+}
+
 Error process_signal(int pid, Signal signal, Err *err)
 {
-    int number = signal == SIGNAL_RELOAD ? SIGHUP : SIGTERM;
-    if (kill((pid_t)pid, number) == 0) {
+    // kill takes 0 and negative numbers as whole groups, or every process.
+    if (pid <= 0) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "signal pid %d: not a process", pid);
+    }
+    if (kill((pid_t)pid, signal_number(signal)) == 0) {
         return ERR_OK;
     }
     Error code = errno == ESRCH ? ERR_NOT_FOUND : ERR_PLATFORM;
     return err_set(err, code, "signal pid %d: %s", pid, strerror(errno));
+}
+
+Error process_signal_group(int group_id, Signal signal, Err *err)
+{
+    // killpg takes 0 as this process's own group.
+    if (group_id <= 0) {
+        return err_set(err, ERR_INVALID_ARGUMENT, "signal group %d: not a group", group_id);
+    }
+    if (killpg((pid_t)group_id, signal_number(signal)) == 0) {
+        return ERR_OK;
+    }
+    Error code = errno == ESRCH ? ERR_NOT_FOUND : ERR_PLATFORM;
+    return err_set(err, code, "signal group %d: %s", group_id, strerror(errno));
 }
 
 // ---- network ----
