@@ -271,7 +271,8 @@ String host_short_name(Arena *arena);
 
 // ---- signals ----
 
-typedef enum Signal { SIGNAL_STOP, SIGNAL_RELOAD } Signal;
+// SIGNAL_KILL is SIGKILL, which can only be sent: signals_wait never reports it.
+typedef enum Signal { SIGNAL_STOP, SIGNAL_RELOAD, SIGNAL_KILL } Signal;
 
 // signals_block keeps the stop (SIGINT, SIGTERM) and reload (SIGHUP) signals
 // from interrupting any thread; call it before starting threads.
@@ -288,9 +289,13 @@ typedef struct SignalWatch SignalWatch;
                                        SignalWatch **watch, Err *err);
 // signal_watch_stop ends the watching thread; on_signal is not called after it returns.
 void signal_watch_stop(SignalWatch *watch);
-// process_signal sends pid the stop (SIGTERM) or reload (SIGHUP) signal; a
-// process that is gone is ERR_NOT_FOUND.
+// process_signal sends pid the stop (SIGTERM), reload (SIGHUP) or kill
+// (SIGKILL) signal; a process that is gone is ERR_NOT_FOUND, and a pid below
+// 1 is ERR_INVALID_ARGUMENT.
 [[nodiscard]] Error process_signal(int pid, Signal signal, Err *err);
+// process_signal_group sends signal to every process of group_id, as
+// process_signal does to one.
+[[nodiscard]] Error process_signal_group(int group_id, Signal signal, Err *err);
 
 // ---- network ----
 

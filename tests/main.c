@@ -21,6 +21,7 @@
 #include "test_net.c"
 #include "test_platform.c"
 #include "test_pool.c"
+#include "test_procinfo.c"
 #include "test_pty.c"
 #include "test_s3.c"
 #include "test_service.c"
@@ -121,7 +122,7 @@ int main(int argc, char **argv)
         thread_detach(&watchdog);
     }
     const TestCase *tables[] = { ARENA_TESTS, STR_TESTS, STRMAP_TESTS, IDTABLE_TESTS, POOL_TESTS, TEXT_TESTS, PLATFORM_TESTS, CONCURRENCY_TESTS,
-                                   ENCODING_TESTS, MAIL_TESTS, LOG_TESTS, WATCH_TESTS, SERVICE_TESTS, PTY_TESTS, SYSINFO_TESTS, HTTP_TESTS,
+                                   ENCODING_TESTS, MAIL_TESTS, LOG_TESTS, WATCH_TESTS, SERVICE_TESTS, PTY_TESTS, SYSINFO_TESTS, PROCINFO_TESTS, HTTP_TESTS,
                                    SMTP_TESTS, S3_TESTS, FTP_TESTS, TERM_STYLE_TESTS, TERM_ANSI_TESTS, TERM_ANIMATION_TESTS, TERM_LIVE_TESTS, TERM_INPUT_TESTS, TERM_LIST_TESTS, TERM_LAYOUT_TESTS, TERM_SCREEN_TESTS, TERM_LOG_TESTS, HTTP_SERVER_TESTS, STATIC_FILES_TESTS, ACME_TESTS, DNS_TESTS, IP_TESTS, SIGNATURE_TESTS };
     unsigned failed = 0;
     unsigned checks = 0;
